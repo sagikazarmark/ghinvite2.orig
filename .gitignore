@@ -35,3 +35,6 @@ __pycache__/
 
 # Worker runtime launcher evidence (tests/worker/run-runtime.mjs)
 .runtime-evidence/
+
+# octoemu's live fidelity env file and keys (docs/live-github-tests.md)
+/.octoemu-live/

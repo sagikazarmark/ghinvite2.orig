@@ -13,8 +13,10 @@ Not yet published; developed inside the ghinvite repository.
 
 - The fidelity suite (GE-08): `Target::Emulator` (a fresh embedded octoemu
   per scenario, seeded with the fidelity world) and `Target::Live` (real
-  GitHub, from the env file `OCTOEMU_LIVE_ENV` names, kept outside the
-  repository); 20 scenarios over public routes, each with a stable ID in
+  GitHub, from `.octoemu-live/live.env` at the repository root or the env
+  file `OCTOEMU_LIVE_ENV` names; inside the repository the env file and
+  the App's private key must be ignored by git, and a relative key path is
+  resolved against the env file); 20 scenarios over public routes, each with a stable ID in
   octoemu's `fidelity.toml` `[scenarios]` table; `destructive` and `slow`
   scenarios run live only on request.
 - Normalised snapshots under `snapshots/` (compare and record modes; field

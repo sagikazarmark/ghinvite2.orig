@@ -331,7 +331,9 @@ organization renames itself. Answers GitHub would not give on its own (a
 refused, throttled, unanswered or lost write, a recycled login, an
 installation reported under another account, an outage) are
 [fault rules](../libs/octoauth/crates/octoemu/README.md#fault-rules), and
-counts come from the emulator's call log. Every suite runs on it except
+counts come from the emulator's call log (how closely it matches real
+GitHub is checked by its fidelity suite, whose live side is set up in
+[live-github-tests.md](live-github-tests.md)). Every suite runs on it except
 `repository_protocol` and `organization_delivery`, which keep their
 scenario fakes (`start_with_github_router`). Their AC-DLV-3 sequence
 properties (`tests/common/delivery_sequence.rs`, checked by

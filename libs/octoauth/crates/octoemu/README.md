@@ -778,7 +778,7 @@ Run it (from `libs/octoauth`):
 ```console
 $ cargo test -p octoemu-conformance -- --nocapture            # emulator, compare; prints the report
 $ OCTOEMU_CONFORMANCE=record cargo test -p octoemu-conformance --test emulator
-$ OCTOEMU_LIVE_ENV=$HOME/.config/octoemu/live.env OCTOEMU_CONFORMANCE=record \
+$ OCTOEMU_CONFORMANCE=record \
     cargo test -p octoemu-conformance --test live -- --ignored --nocapture
 ```
 
@@ -794,9 +794,15 @@ the emulator target in the toolkit job; the manual workflow
 `.github/workflows/fidelity-live.yml` (`workflow_dispatch` only) runs the
 live target from repository secrets.
 
-**The live env file** lives outside the repository (the suite refuses a
-path inside it): `KEY=VALUE` lines, `#` comments (also after an unquoted
-value), unknown keys refused. Placeholder values:
+**The live env file** is `.octoemu-live/live.env` at the repository root
+(ignored by the root `.gitignore`), or wherever `OCTOEMU_LIVE_ENV` points.
+Inside the repository, the suite refuses an env file or a private key git
+does not ignore; a relative `OCTOEMU_LIVE_APP_PRIVATE_KEY_PATH` is resolved
+against the env file's directory. Format: `KEY=VALUE` lines, `#` comments
+(also after an unquoted value), unknown keys refused. Setting up the Apps,
+organizations and users it names, step by step:
+[`docs/live-github-tests.md`](../../../../docs/live-github-tests.md).
+Placeholder values:
 
 ```sh
 # The fidelity App: a GitHub App installed on OCTOEMU_LIVE_ORG with
@@ -805,7 +811,7 @@ value), unknown keys refused. Placeholder values:
 # URL; deliveries are read back through the deliveries API).
 OCTOEMU_LIVE_APP_ID=123456
 OCTOEMU_LIVE_APP_CLIENT_ID=Iv23.exampleclientid       # optional: the JWT iss (else the App ID)
-OCTOEMU_LIVE_APP_PRIVATE_KEY_PATH=/path/outside/the/repo/fidelity-app.pem
+OCTOEMU_LIVE_APP_PRIVATE_KEY_PATH=fidelity-app.pem   # next to this file
 OCTOEMU_LIVE_APP_WEBHOOK_SECRET=REPLACE_WITH_THE_WEBHOOK_SECRET  # optional, reserved
 OCTOEMU_LIVE_INSTALLATION_ID=12345678
 # A fresh free organization, one repository and one team in it.

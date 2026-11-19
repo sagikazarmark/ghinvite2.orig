@@ -1,9 +1,10 @@
 //! The fidelity suite against real GitHub. Ignored unless asked for, and
-//! then it needs `OCTOEMU_LIVE_ENV` naming the live env file (outside the
-//! repository; format in the octoemu README):
+//! then it needs the live env file: `.octoemu-live/live.env` at the
+//! repository root, or `OCTOEMU_LIVE_ENV` (format in the octoemu README,
+//! setup in `docs/live-github-tests.md`):
 //!
 //! ```text
-//! OCTOEMU_LIVE_ENV=/path/live.env OCTOEMU_CONFORMANCE=record \
+//! OCTOEMU_CONFORMANCE=record \
 //!   cargo test -p octoemu-conformance --test live -- --ignored --nocapture
 //! ```
 //!
@@ -14,7 +15,7 @@
 use octoemu_conformance::{Options, Target, run};
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "real GitHub: needs OCTOEMU_LIVE_ENV (see the octoemu README)"]
+#[ignore = "real GitHub: needs the live env file (see the octoemu README)"]
 async fn live() {
     let target = Target::live_from_env().unwrap();
     let options = Options::from_env().unwrap();

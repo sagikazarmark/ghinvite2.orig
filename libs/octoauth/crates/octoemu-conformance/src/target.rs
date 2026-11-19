@@ -5,8 +5,10 @@
 //! Seeding is setup, not a scenario step, so it may use the admin API (and
 //! a scenario's [`EmulatorSetup`]); the steps use public routes only.
 //!
-//! The live target reads an env file kept outside the repository, named by
-//! `OCTOEMU_LIVE_ENV` (format in the octoemu README).
+//! The live target reads an env file named by `OCTOEMU_LIVE_ENV`, else
+//! `.octoemu-live/live.env` at the repository root (format in the octoemu
+//! README). Inside the repository, the env file and the App's private key
+//! must be ignored by git.
 
 use octoemu::Emulator;
 use octoemu::seed::{
@@ -147,12 +149,19 @@ impl Target {
         Self::Emulator
     }
 
-    /// The live target, from the env file `OCTOEMU_LIVE_ENV` names.
+    /// The live target, from the env file `OCTOEMU_LIVE_ENV` names, else
+    /// [`DEFAULT_LIVE_ENV`] at the repository root.
     pub fn live_from_env() -> Result<Self, String> {
-        let path = std::env::var_os("OCTOEMU_LIVE_ENV").ok_or(
-            "OCTOEMU_LIVE_ENV is not set: it names the live env file (see the octoemu README)",
-        )?;
-        LiveConfig::load(Path::new(&path)).map(|config| Self::Live(Box::new(config)))
+        let path = match std::env::var_os("OCTOEMU_LIVE_ENV") {
+            Some(path) => PathBuf::from(path),
+            None => repository_root()
+                .map(|root| root.join(DEFAULT_LIVE_ENV))
+                .ok_or(
+                    "OCTOEMU_LIVE_ENV is not set and there is no repository root to find \
+                 the default env file in (see the octoemu README)",
+                )?,
+        };
+        LiveConfig::load(&path).map(|config| Self::Live(Box::new(config)))
     }
 
     /// Which kind.
@@ -387,6 +396,10 @@ fn emulator_world(emulator: &Emulator) -> Result<World, String> {
 const GITHUB_API: &str = "https://api.github.com";
 const GITHUB_WEB: &str = "https://github.com";
 
+/// The env file's default place, relative to the repository root (the
+/// root `.gitignore` ignores the directory).
+pub const DEFAULT_LIVE_ENV: &str = ".octoemu-live/live.env";
+
 /// The live target's configuration, from the env file.
 #[derive(Debug)]
 pub struct LiveConfig {
@@ -420,23 +433,29 @@ pub const LIVE_KEYS: &[(&str, bool)] = &[
 ];
 
 impl LiveConfig {
-    /// Reads and checks the env file at `path`, which must lie outside the
-    /// repository.
+    /// Reads and checks the env file at `path`. Inside the repository, it
+    /// and the private key must be ignored by git, so neither can be
+    /// committed by accident. A relative `OCTOEMU_LIVE_APP_PRIVATE_KEY_PATH`
+    /// is resolved against the env file's directory.
     pub fn load(path: &Path) -> Result<Self, String> {
         let canonical =
             std::fs::canonicalize(path).map_err(|error| format!("{}: {error}", path.display()))?;
-        if let Some(root) = repository_root()
-            && canonical.starts_with(&root)
-        {
-            return Err(format!(
-                "{} is inside the repository ({}): keep the live env file outside it",
-                path.display(),
-                root.display()
-            ));
-        }
+        refuse_unignored(&canonical, "the live env file")?;
         let text = std::fs::read_to_string(&canonical)
             .map_err(|error| format!("{}: {error}", path.display()))?;
-        let values = parse_env(&text)?;
+        let mut values = parse_env(&text)?;
+        if let (Some(key), Some(dir)) = (
+            values.get_mut("OCTOEMU_LIVE_APP_PRIVATE_KEY_PATH"),
+            canonical.parent(),
+        ) && Path::new(key.as_str()).is_relative()
+        {
+            *key = dir.join(&*key).to_string_lossy().into_owned();
+        }
+        if let Some(key) = values.get("OCTOEMU_LIVE_APP_PRIVATE_KEY_PATH")
+            && let Ok(key) = std::fs::canonicalize(key)
+        {
+            refuse_unignored(&key, "the App's private key")?;
+        }
         Self::from_values(values)
     }
 
@@ -557,6 +576,38 @@ fn repository_root() -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
+/// Refuses `path` (canonical) when it lies inside the repository and git
+/// does not ignore it (a tracked file is never ignored).
+fn refuse_unignored(path: &Path, what: &str) -> Result<(), String> {
+    let Some(root) = repository_root() else {
+        return Ok(());
+    };
+    if !path.starts_with(&root) {
+        return Ok(());
+    }
+    let ignored = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["check-ignore", "-q", "--"])
+        .arg(path)
+        .status()
+        .map_err(|error| format!("{what} is inside the repository and git did not run: {error}"))?;
+    if ignored.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{what} ({}) is inside the repository ({}) and not ignored by git: \
+             keep it in {} or outside the repository",
+            path.display(),
+            root.display(),
+            Path::new(DEFAULT_LIVE_ENV)
+                .parent()
+                .unwrap_or(Path::new("."))
+                .display(),
+        ))
+    }
+}
+
 /// `KEY=VALUE` lines; blank lines and `#` comments skipped (also after an
 /// unquoted value); `export ` and one pair of matching quotes around the
 /// value allowed.
@@ -649,10 +700,34 @@ mod tests {
     }
 
     #[test]
-    fn an_env_file_inside_the_repository_is_refused() {
-        let inside = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
-        let error = LiveConfig::load(&inside).unwrap_err();
-        assert!(error.contains("inside the repository"), "{error}");
+    fn an_env_file_inside_the_repository_is_refused_unless_ignored() {
+        let tracked = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let error = LiveConfig::load(&tracked).unwrap_err();
+        assert!(error.contains("not ignored by git"), "{error}");
+
+        // `target/` is ignored; the key path is relative to the env file.
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("live-env-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("app.pem"), EMULATOR_PRIVATE_KEY).unwrap();
+        let mut text = String::new();
+        for (key, required) in LIVE_KEYS {
+            let value = match *key {
+                "OCTOEMU_LIVE_APP_PRIVATE_KEY_PATH" => "app.pem",
+                "OCTOEMU_LIVE_APP_ID" | "OCTOEMU_LIVE_INSTALLATION_ID" => "1",
+                _ if *required => "x",
+                _ => continue,
+            };
+            text.push_str(&format!("{key}={value}\n"));
+        }
+        std::fs::write(dir.join("live.env"), text).unwrap();
+        let loaded = LiveConfig::load(&dir.join("live.env"));
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(
+            loaded.unwrap().world().app.private_key,
+            EMULATOR_PRIVATE_KEY
+        );
     }
 
     #[test]

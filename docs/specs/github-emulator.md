@@ -158,7 +158,7 @@ Every route and every modelled behaviour has an entry in a checked-in manifest (
 ## 4. Fidelity suite
 
 - **One scenario crate, `octoemu-conformance`, run against `Target::Emulator` or `Target::Live`.**
-  - The live target reads credentials from an env file outside the repository: the test Apps, the org and the invitee's personal access token, as in the earlier answer on live gates.
+  - The live target reads credentials from an env file: the test Apps, the org and the invitee's personal access token, as in the earlier answer on live gates. It lives in `.octoemu-live/` at the repository root, which git ignores (the suite refuses an unignored path inside the repository), or anywhere `OCTOEMU_LIVE_ENV` names; setup in [`docs/live-github-tests.md`](../live-github-tests.md).
   - Scenarios use only public GitHub routes, never the admin API. The one exception is the clock, which a live run replaces with waiting or skips (7-day expiry is live-only, run once).
 - **Snapshots, LocalStack style.**
   - A live run records status, the headers we rely on, and the body, normalised: IDs, timestamps, tokens, GUIDs and URLs become placeholders.
