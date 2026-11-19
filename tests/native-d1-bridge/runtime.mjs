@@ -10,7 +10,7 @@ import {schemaQuery,sha256} from '../../native-d1-bridge/bridge.mjs';
 const require=createRequire(new URL('../worker/package.json',import.meta.url));
 const {Miniflare,Log,LogLevel,supportedCompatibilityDate}=require('miniflare');
 // The deployed bridge's date (native-d1-bridge/manifest.py), capped at the newest
-// date this workerd supports: miniflare used to fall back silently, now it refuses.
+// date this workerd supports (4.20260302 falls back with a warning; later releases refuse).
 const bridgeCompatibilityDate=['2026-10-01',supportedCompatibilityDate].sort()[0];
 const evidence=process.env.EVIDENCE_ROOT;assert.ok(evidence);mkdirSync(evidence,{recursive:true});
 const binary=process.argv[2];assert.ok(binary,'Pass built native_bridge test executable');
