@@ -26,9 +26,9 @@ const mf=new Miniflare({
   compatibilityDate:'2024-09-23',compatibilityFlags:['nodejs_compat'],
   kvNamespaces:['SESSIONS','AUTHZ_CACHE'],d1Databases:['DB'],
   ratelimits:{
-    RL_IP:{simple:{limit:30,period:60}},
-    RL_USER:{simple:{limit:10,period:60}},
-    AUTHZ_RL:{simple:{limit:10,period:60}},
+    RL_IP:{namespace_id:'1001',simple:{limit:30,period:60}},
+    RL_USER:{namespace_id:'1002',simple:{limit:10,period:60}},
+    AUTHZ_RL:{namespace_id:'1003',simple:{limit:10,period:60}},
   },
   bindings:{...installedWebApp,
     P1_HOST:'app.test',

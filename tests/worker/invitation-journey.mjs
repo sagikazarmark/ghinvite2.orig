@@ -21,7 +21,7 @@ export function journeyWorker(ingress, github) {
     modulesRules: [{ type: 'CompiledWasm', include: ['**/*.wasm'] }],
     compatibilityDate: '2024-09-23', compatibilityFlags: ['nodejs_compat'],
     kvNamespaces: ['SESSIONS', 'AUTHZ_CACHE'],
-    ratelimits: { RL_IP: { simple: { limit: 30, period: 60 } }, RL_USER: { simple: { limit: 10, period: 60 } }, AUTHZ_RL: { simple: { limit: 10, period: 60 } } },
+    ratelimits: { RL_IP: { namespace_id: '1001', simple: { limit: 30, period: 60 } }, RL_USER: { namespace_id: '1002', simple: { limit: 10, period: 60 } }, AUTHZ_RL: { namespace_id: '1003', simple: { limit: 10, period: 60 } } },
     d1Databases: { DB: 'journey-shared' },
     bindings: {
       ...(entropyFixture ? { P1_LINK_SECRET_FIXTURE: 'known-marker-v1' } : {}),
@@ -35,7 +35,7 @@ export function journeyWorker(ingress, github) {
       if (url.origin === 'https://ingress.fixture.test') {
         assert.equal(request.headers.get('authorization'), 'Bearer synthetic-worker-ingress-key');
         const input = Buffer.from(await request.arrayBuffer());
-        const response = await fetch(`${ingress}${url.pathname}${url.search}`, { method: request.method, headers: request.headers, body: input, signal: AbortSignal.timeout(25_000) });
+        const response = await fetch(`${ingress}${url.pathname}${url.search}`, { method: request.method, headers: [...request.headers].filter(([name]) => name !== 'content-length'), body: input, signal: AbortSignal.timeout(25_000) });
         const body = await response.arrayBuffer();
         const method = url.pathname.split('/').at(-1);
         if (['create', 'admit', 'decide'].includes(method) && response.ok) {

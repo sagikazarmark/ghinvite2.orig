@@ -29,7 +29,7 @@ export function organizationWebhookWorker(ingress) {
     modulesRules: [{ type: 'CompiledWasm', include: ['**/*.wasm'] }],
     compatibilityDate: '2024-09-23', compatibilityFlags: ['nodejs_compat'],
     kvNamespaces: ['SESSIONS', 'AUTHZ_CACHE'],
-    ratelimits: { RL_IP: { simple: { limit: 30, period: 60 } }, RL_USER: { simple: { limit: 10, period: 60 } }, AUTHZ_RL: { simple: { limit: 10, period: 60 } } },
+    ratelimits: { RL_IP: { namespace_id: '1001', simple: { limit: 30, period: 60 } }, RL_USER: { namespace_id: '1002', simple: { limit: 10, period: 60 } }, AUTHZ_RL: { namespace_id: '1003', simple: { limit: 10, period: 60 } } },
     d1Databases: { DB: 'journey-shared' },
     bindings: {
       P1_HOST: 'journey.test', P1_KEYRING: 'kekring1;name=p1;current=1;hwm=1;k1=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc.9fdab21f330c89b7',
@@ -48,7 +48,7 @@ export function organizationWebhookWorker(ingress) {
       assert.match(url.pathname, /^\/OrganizationDelivery\/[^/]+\/on_webhook\/send$/);
       const input = Buffer.from(await request.arrayBuffer());
       forwarded.push(JSON.parse(input));
-      const response = await fetch(`${ingress}${url.pathname}`, { method: request.method, headers: request.headers, body: input, signal: AbortSignal.timeout(25_000) });
+      const response = await fetch(`${ingress}${url.pathname}`, { method: request.method, headers: [...request.headers].filter(([name]) => name !== 'content-length'), body: input, signal: AbortSignal.timeout(25_000) });
       const body = await response.arrayBuffer();
       if (response.ok && loseAcknowledgement) {
         loseAcknowledgement = false;

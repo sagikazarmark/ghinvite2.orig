@@ -29,7 +29,7 @@
     "test:org-webhooks": "node build.mjs && node build.mjs workflows && node build-octoemu.mjs && ORG_WEBHOOK_ONLY=1 node run-runtime.mjs admission.mjs",
     "test:domain-signin": "node build.mjs && node build-octoemu.mjs && node run-runtime.mjs domain-signin.mjs",
     "test:signin-cutover": "node build.mjs && node build-octoemu.mjs && node run-runtime.mjs signin-cutover.mjs",
-        "test:email-vault": "node build.mjs && node run-runtime.mjs email-vault.mjs && node run-runtime.mjs email-review.mjs && node run-runtime.mjs email-maintenance.mjs",
+    "test:email-vault": "node build.mjs && node run-runtime.mjs email-vault.mjs && node run-runtime.mjs email-review.mjs && node run-runtime.mjs email-maintenance.mjs",
     "test:access-removal": "node build.mjs workflows && node build-octoemu.mjs && ACCESS_REMOVAL_ONLY=1 node run-runtime.mjs admission.mjs",
     "test:reissue": "node build.mjs workflows && node build-octoemu.mjs && REISSUE_ONLY=1 node run-runtime.mjs admission.mjs",
     "test:email-delivery": "node build.mjs && node build.mjs workflows && node build-octoemu.mjs && EMAIL_DELIVERY_ONLY=1 node run-runtime.mjs admission.mjs",
@@ -44,7 +44,11 @@
     "node": ">=20"
   },
   "devDependencies": {
-    "esbuild": "0.27.3",
-    "miniflare": "4.20260302.0"
+    "esbuild": "0.28.2",
+    "miniflare": "4.20260730.0"
+  },
+  "overrides": {
+    "sharp": "0.35.5",
+    "undici": "7.30.2"
   }
 }

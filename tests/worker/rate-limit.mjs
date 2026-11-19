@@ -15,9 +15,9 @@ const missing = new Miniflare(options);
 try { assert.equal((await request(missing, 'ip', '192.0.2.1')).status, 503); }
 finally { await missing.dispose(); }
 const mf = new Miniflare({ ...options, ratelimits: {
-  RL_IP: { simple: { limit: 30, period: 60 } },
-  RL_USER: { simple: { limit: 10, period: 60 } },
-  AUTHZ_RL: { simple: { limit: 10, period: 60 } },
+  RL_IP: { namespace_id: '1001', simple: { limit: 30, period: 60 } },
+  RL_USER: { namespace_id: '1002', simple: { limit: 10, period: 60 } },
+  AUTHZ_RL: { namespace_id: '1003', simple: { limit: 10, period: 60 } },
 } });
 try {
   for (let i=0;i<30;i++) assert.equal((await request(mf, 'ip', '192.0.2.1')).status, 204);

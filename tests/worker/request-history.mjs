@@ -14,7 +14,7 @@ const mf = new Miniflare({
   scriptPath: fileURLToPath(new URL('./worker.mjs', import.meta.url)),
   modulesRules: [{ type: 'CompiledWasm', include: ['**/*.wasm'] }],
   compatibilityDate: '2024-09-23', compatibilityFlags: ['nodejs_compat'],
-  ratelimits: { RL_IP: { simple: { limit: 30, period: 60 } }, RL_USER: { simple: { limit: 10, period: 60 } }, AUTHZ_RL: { simple: { limit: 10, period: 60 } } },
+  ratelimits: { RL_IP: { namespace_id: '1001', simple: { limit: 30, period: 60 } }, RL_USER: { namespace_id: '1002', simple: { limit: 10, period: 60 } }, AUTHZ_RL: { namespace_id: '1003', simple: { limit: 10, period: 60 } } },
   kvNamespaces: ['SESSIONS', 'AUTHZ_CACHE'], d1Databases: ['DB'],
   bindings: {
     P1_HOST: 'history.test', P1_KEYRING: 'kekring1;name=p1;current=1;hwm=1;k1=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc.9fdab21f330c89b7',

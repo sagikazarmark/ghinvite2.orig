@@ -81,10 +81,14 @@ export class Octoemu {
   /**
    * Passes a Worker's outbound request through to the emulator unchanged, for
    * drivers whose `outboundService` also handles other origins (Restate).
+   * `content-length` is dropped because fetch sets it from the body. Miniflare
+   * installs its undici as the global dispatcher, and from 7.2x undici rejects
+   * the doubled value ("invalid content-length header"). The Restate ingress
+   * forwarders in the other drivers drop it for the same reason.
    */
   async forward(request) {
     const body = ['GET', 'HEAD'].includes(request.method) ? undefined : Buffer.from(await request.arrayBuffer());
-    const response = await fetch(request.url, { method: request.method, headers: request.headers, body, redirect: 'manual' });
+    const response = await fetch(request.url, { method: request.method, headers: [...request.headers].filter(([name]) => name !== 'content-length'), body, redirect: 'manual' });
     return new Response([204, 205, 304].includes(response.status) ? null : await response.arrayBuffer(), { status: response.status, headers: response.headers });
   }
 
