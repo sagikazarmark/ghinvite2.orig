@@ -145,6 +145,5 @@ async fn emulator_signin_browser_server() {
                 move || async move { web_base }
             }),
         );
-    let listener = tokio::net::TcpListener::bind(ADDRESS).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    common::browser_fixture::serve(ADDRESS, app).await;
 }

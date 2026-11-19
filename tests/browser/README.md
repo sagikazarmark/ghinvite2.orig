@@ -8,6 +8,13 @@ native and Worker journeys through real owners, see
 Renaming/narrowing this fixture does not complete the fake/real conformance work
 tracked in #114.
 
+The Rust router servers start through `crates/ghinvite-web/tests/common/browser_fixture.rs`.
+They log the app's `tracing` events and one line per completed request to stderr,
+which Playwright prints as `[WebServer]` lines. `RUST_LOG` sets the filter.
+`GHINVITE_FIXTURE_LOG_DIR` also writes each server's log to `<dir>/<test name>.log`.
+CI sets it to `tests/browser/fixture-logs` and uploads that directory with the
+failure artifacts.
+
 ## Invitation-link revocation confirmation
 
 Run `npm exec --prefix tests/browser -- playwright test --config tests/browser/revocation.config.mjs`

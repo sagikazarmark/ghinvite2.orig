@@ -16,30 +16,55 @@ use ghinvite_core::storage::{
 };
 use ghinvite_core::{InvitationLink, InvitationLinkId, InvitationRequest, RequestId, User};
 use serde::de::{DeserializeOwned, IgnoredAny};
-use sqlx::sqlite::{SqliteArguments, SqliteConnectOptions, SqlitePoolOptions};
-use sqlx::{Sqlite, SqlitePool};
+use sqlx::sqlite::{SqliteArguments, SqliteConnectOptions, SqliteConnection, SqlitePoolOptions};
+use sqlx::{ConnectOptions, Sqlite, SqlitePool};
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 type Query<'q> = sqlx::query::Query<'q, Sqlite, SqliteArguments<'q>>;
 
 #[derive(Clone)]
 pub struct SqlxStorage {
     pub(crate) pool: SqlitePool,
+    /// Holds an in-memory database open; `None` for a file.
+    _memory: Option<Arc<SqliteConnection>>,
 }
 
 impl SqlxStorage {
     /// Open an in-memory SQLite database. Each call gets a fresh DB.
     /// Useful for unit and storage-suite tests.
+    ///
+    /// The database lives as long as any clone of this storage. sqlx closes
+    /// and replaces a pool connection whenever an acquire or query is
+    /// cancelled at the wrong point (a dropped request future), and a
+    /// connection to plain `:memory:` takes its database with it: the
+    /// replacement would open a new, empty one ("no such table", #127). So
+    /// the database is a named shared-cache one, and a connection outside
+    /// the pool keeps it open across replacements.
     pub async fn in_memory() -> Result<Self> {
+        // Named in-memory databases are per process; the counter keeps them apart.
+        static DATABASES: AtomicU64 = AtomicU64::new(0);
+        let name = format!(
+            "file:ghinvite-memory-{}",
+            DATABASES.fetch_add(1, Ordering::Relaxed)
+        );
         let opts = SqliteConnectOptions::new()
+            .filename(name)
             .in_memory(true)
+            .shared_cache(true)
             .foreign_keys(true);
+        let memory = opts.connect().await.map_err(to_db_err)?;
         let pool = SqlitePoolOptions::new()
-            .max_connections(1) // in-memory shares one connection so all queries see the same DB
+            // One connection, so a writer never meets shared-cache table locks.
+            .max_connections(1)
             .connect_with(opts)
             .await
             .map_err(to_db_err)?;
-        let s = Self { pool };
+        let s = Self {
+            pool,
+            _memory: Some(Arc::new(memory)),
+        };
         s.run_migrations().await?;
         Ok(s)
     }
@@ -55,7 +80,10 @@ impl SqlxStorage {
             .connect_with(opts)
             .await
             .map_err(to_db_err)?;
-        let s = Self { pool };
+        let s = Self {
+            pool,
+            _memory: None,
+        };
         s.run_migrations().await?;
         Ok(s)
     }
@@ -1006,6 +1034,35 @@ mod tests {
             .await
             .unwrap();
         assert!(row.0 >= 1, "expected at least one migration applied");
+    }
+
+    /// #127: sqlx replaces a pool connection after a cancelled acquire or
+    /// query; the replacement must see the same database, not an empty one.
+    #[tokio::test]
+    async fn in_memory_database_survives_a_replaced_pool_connection() {
+        let s = SqlxStorage::in_memory().await.unwrap();
+        let other = SqlxStorage::in_memory().await.unwrap();
+        sqlx::query("CREATE TABLE marker (id INTEGER)")
+            .execute(&s.pool)
+            .await
+            .unwrap();
+        s.pool.acquire().await.unwrap().close().await.unwrap();
+        let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM _sqlx_migrations")
+            .fetch_one(&s.pool)
+            .await
+            .unwrap();
+        assert!(row.0 >= 1, "the replacement connection lost the schema");
+        sqlx::query("SELECT id FROM marker")
+            .fetch_all(&s.pool)
+            .await
+            .unwrap();
+        // Each storage is still its own database.
+        assert!(
+            sqlx::query("SELECT id FROM marker")
+                .fetch_all(&other.pool)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

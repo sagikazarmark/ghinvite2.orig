@@ -217,10 +217,7 @@ async fn document_browser_server() {
             let app = served.clone();
             async move { app.oneshot(request).await.unwrap() }
         });
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:4175")
-        .await
-        .unwrap();
-    axum::serve(listener, server).await.unwrap();
+    common::browser_fixture::serve("127.0.0.1:4175", server).await;
 }
 
 /// GitHub reads the Console makes on every request. `MockTransport` scripts one

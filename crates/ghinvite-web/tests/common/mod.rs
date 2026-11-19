@@ -1,5 +1,6 @@
 pub mod apps;
 pub mod authority_http_fixture;
+pub mod browser_fixture;
 pub mod capability;
 pub mod restate_recorder;
 pub mod sign_in;

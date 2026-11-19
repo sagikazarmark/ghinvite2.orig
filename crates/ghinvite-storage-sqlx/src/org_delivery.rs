@@ -153,9 +153,7 @@ mod tests {
             OrgDeliveryQuery, OrgDeliveryReadStorage,
         };
         let storage = SqlxStorage::in_memory().await.unwrap();
-        let clone = SqlxStorage {
-            pool: storage.pool.clone(),
-        };
+        let clone = storage.clone();
         ghinvite_core::storage::test_suite::scenario_organization_delivery_reads(clone).await;
         let row = sqlx::query("SELECT d.id,o.receipt FROM deliveries d JOIN delivery_outcomes o ON o.delivery_id=d.id WHERE d.kind='org' ORDER BY d.delivery_generation LIMIT 1")
             .fetch_one(&storage.pool).await.unwrap();
@@ -208,9 +206,7 @@ mod tests {
     #[tokio::test]
     async fn concurrent_projection_predecessor_change_is_retryable_and_atomic() {
         let storage = SqlxStorage::in_memory().await.unwrap();
-        let clone = SqlxStorage {
-            pool: storage.pool.clone(),
-        };
+        let clone = storage.clone();
         ghinvite_core::storage::test_suite::scenario_organization_delivery(clone).await;
         let id: String = sqlx::query_scalar(
             "SELECT id FROM deliveries WHERE kind='org' ORDER BY delivery_generation LIMIT 1",

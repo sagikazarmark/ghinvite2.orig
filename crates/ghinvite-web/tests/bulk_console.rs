@@ -381,14 +381,7 @@ async fn bulk_browser_server() {
             let app = app.clone();
             async move { app.oneshot(request).await.unwrap() }
         });
-    axum::serve(
-        tokio::net::TcpListener::bind("127.0.0.1:4198")
-            .await
-            .unwrap(),
-        server,
-    )
-    .await
-    .unwrap();
+    common::browser_fixture::serve("127.0.0.1:4198", server).await;
 }
 async fn fixture(
     enabled: bool,

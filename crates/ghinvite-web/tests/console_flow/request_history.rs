@@ -75,10 +75,7 @@ async fn request_history_browser_server() {
             let app = app.clone();
             async move { app.oneshot(request).await.unwrap() }
         });
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:4178")
-        .await
-        .unwrap();
-    axum::serve(listener, fixture).await.unwrap();
+    crate::common::browser_fixture::serve("127.0.0.1:4178", fixture).await;
 }
 
 #[tokio::test]

@@ -782,10 +782,7 @@ async fn admission_browser_server() {
             let app = current.lock().unwrap().as_ref().unwrap().app.clone();
             async move { app.oneshot(request).await.unwrap() }
         });
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:4174")
-        .await
-        .unwrap();
-    axum::serve(listener, app).await.unwrap();
+    common::browser_fixture::serve("127.0.0.1:4174", app).await;
 }
 
 #[tokio::test]

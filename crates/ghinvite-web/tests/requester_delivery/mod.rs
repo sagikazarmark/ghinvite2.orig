@@ -552,10 +552,7 @@ async fn delivery_browser_server() {
                 app.oneshot(request).await.unwrap()
             }
         });
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:4175")
-        .await
-        .unwrap();
-    axum::serve(listener, app).await.unwrap();
+    crate::common::browser_fixture::serve("127.0.0.1:4175", app).await;
 }
 
 mod organization;

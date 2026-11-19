@@ -365,14 +365,7 @@ async fn onboarding_browser_server() {
             let app = app.clone();
             async move { app.oneshot(request).await.unwrap() }
         });
-    axum::serve(
-        tokio::net::TcpListener::bind("127.0.0.1:4199")
-            .await
-            .unwrap(),
-        router,
-    )
-    .await
-    .unwrap();
+    common::browser_fixture::serve("127.0.0.1:4199", router).await;
 }
 
 #[test]

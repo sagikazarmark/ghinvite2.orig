@@ -387,6 +387,10 @@ jobs:
   island:
     name: Island bundle
     runs-on: ubuntu-24.04
+    env:
+      # The Rust browser fixture servers also write their logs here (each
+      # step's log shows them too, as `[WebServer]` lines); uploaded on failure.
+      GHINVITE_FIXTURE_LOG_DIR: ${{ github.workspace }}/tests/browser/fixture-logs
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.92.0
@@ -473,6 +477,7 @@ jobs:
           path: |
             tests/browser/playwright-report
             tests/browser/test-results
+            tests/browser/fixture-logs
           retention-days: 7
           if-no-files-found: ignore
       - uses: actions/upload-artifact@v4

@@ -291,12 +291,5 @@ async fn reissue_browser_server() {
             let app = app.clone();
             async move { app.oneshot(request).await.unwrap() }
         });
-    axum::serve(
-        tokio::net::TcpListener::bind("127.0.0.1:4197")
-            .await
-            .unwrap(),
-        fixture,
-    )
-    .await
-    .unwrap();
+    crate::common::browser_fixture::serve("127.0.0.1:4197", fixture).await;
 }
