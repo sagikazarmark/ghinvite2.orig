@@ -225,9 +225,11 @@ Steps in `tests/worker/admission.mjs` that schedule request expiry therefore
 anchor their timeline at the real clock and let lazy expiry in
 `decide`/`request_status` do the work.
 
-**One link admits about 1.3 per second in the workerd fixture: round trips, not a
+**One link admits about 3 per second in the workerd fixture: round trips, not a
 delay.** The `PAUSE_ONLY` burst (21 concurrent `admit`s on one unlimited link)
-finishes in 15-16 s, strictly serialized, on 1.7.9 and 1.8.1 alike. Timing every
+is strictly serialized. It took 15-16 s on 1.7.9 and 1.8.1 alike while the Worker
+rebuilt its endpoint on every request; since that endpoint is built once per isolate
+(2026-11-19) it takes about 6 s. Timing every
 Restate-to-Worker request in `admission.mjs`'s HTTP/2 proxy (2026-11-15, 1.8.1)
 showed no sleep, timer or poll in the path: Restate re-invokes 1.4-1.7 ms (median)
 after each suspension. The time is the number of rounds times the cost of a round:
@@ -241,22 +243,44 @@ after each suspension. The time is the number of rounds times the cost of a roun
   45 of them sit on the critical path under the link's exclusive lock: `admit` (17
   rounds), two `InvitationRequest/apply_link_control` (about 6 each) and
   `InvitationRequest/initialize` (15).
-- One round costs 14-17 ms (median) in this fixture. Of a bare request, Miniflare
-  dispatch is about 0.9 ms, GitHub app and identity configuration about 1.1 ms, and
-  `build_endpoint_with_identity` about 11.5 ms: the Worker rebuilds the endpoint on
-  every request, and binding a service builds its discovery metadata, including the
-  schemars JSON schemas of every handler. The fixture runs a debug Wasm build.
+- One round cost 14-17 ms (median) in this fixture on 2026-11-15. Of a bare request,
+  Miniflare dispatch was about 0.9 ms, GitHub app and identity configuration about
+  1.1 ms, and `build_endpoint_with_identity` about 11.5 ms: the Worker rebuilt the
+  endpoint on every request, and binding a service builds its discovery metadata,
+  including the schemars JSON schemas of every handler. The fixture runs a debug Wasm
+  build.
+
+**The endpoint is now built once per isolate** (`ghinvite-workflows-worker`,
+2026-11-19). The Worker keeps the composed endpoint in a thread-local together with
+everything composition read: the `DB` binding object and every var and secret with
+its value. A request whose env differs (a fixture's fault-injecting `env.DB` proxy, a
+changed var) recomposes and replaces it; an invalid env fails every request and is
+never cached. Identity verification is part of `Endpoint::handle`, so it still runs
+per request. The Worker also answers 404 itself for paths the pinned SDK cannot route
+(fewer than three `/`-separated parts, not `health` or `discover`): on such a path,
+once the signature has verified, the SDK computes `parts.len() - 3`, which panics in
+debug builds and kills the instance. The native server already built its endpoint
+once at startup.
+
+Measured on one 4-core machine with the same debug Wasm build, alternating the old and
+new bundle three times (`PAUSE_ONLY` burst, 21 admissions, ~1,060 Worker requests;
+two other agents were compiling, load 3-6, so absolute times are above the quiet
+2026-11-15 figures):
+
+| | burst | per admission | per request, median (p10) |
+|---|---|---|---|
+| endpoint per request | 18.7-33.2 s | 0.89-1.58 s | 18.5-33.3 ms (15.0-18.7 ms) |
+| endpoint per isolate | 6.0-10.8 s (two of three 6.0-6.5 s) | 0.29-0.52 s | 5.1-11.1 ms (3.6-5.5 ms) |
+
+The p10 gap (about 11.5-14 ms per request) matches the rebuild cost measured above.
 
 The round count is production behaviour, so production has the same per-link
 serialization: about 45 times (Restate-to-Worker RTT plus per-request Worker CPU) per
 admission. A release build makes the CPU part smaller, but it does not go away. The
-fixture is faithful here, so the burst keeps its 90 s client timeout. To raise
-per-link throughput, cut either factor. Build the endpoint once per isolate (or have
-the SDK build discovery metadata only for `/discover`); this fixture swaps `env.DB`
-per request for fault injection, so that needs care. Or cut rounds: issue independent
-state reads together so that one suspension covers them, and merge the two
-`admission_*time` runs. Both change journal shapes and need the usual deployment
-versioning.
+fixture is faithful here, so the burst keeps its 90 s client timeout (hosted runners
+are slower). What remains is cutting rounds: issue independent state reads together
+so that one suspension covers them, and merge the two `admission_*time` runs. Both
+change journal shapes and need the usual deployment versioning; not started.
 
 **`authoritative_admission` needs a Restate server per test.** Each of its tests
 deploys its own endpoint, with its own fault handles and in-memory storage, under the

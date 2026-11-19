@@ -105,6 +105,21 @@ for (const [name, bindings, status] of cases) {
         assert.equal(denied.status, 401, path);
         await denied.text();
       }
+      // The pinned SDK underflows on a signed path with fewer than three parts
+      // (debug builds panic and poison the instance with its cached endpoint);
+      // the Worker answers these itself and keeps serving.
+      for (const path of ['/', '/invoke', '/SECRET_MARKER_DO_NOT_ECHO']) {
+        for (const signed of [current.headers(path), {}]) {
+          const unroutable = await mf.dispatchFetch(`https://startup.test${path}`, { headers: signed });
+          assert.equal(unroutable.status, 404, `${name}: ${path}`);
+          await unroutable.text();
+        }
+      }
+      const after = await mf.dispatchFetch('https://startup.test/discover', {
+        headers: { accept: 'application/vnd.restate.endpointmanifest.v3+json', ...current.headers('/discover') },
+      });
+      assert.equal(after.status, 200, `${name}: discovery after unroutable paths`);
+      await after.text();
     }
     assert.equal(outgoing, 0, 'registry startup/discovery must not call GitHub');
   } finally {
