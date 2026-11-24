@@ -20,8 +20,8 @@ of the hosted-job execution work in #52; local passes do not prove hosted jobs r
 - worker-build pins Binaryen/wasm-opt **129** and esbuild **0.28.0**. Its default
   bindgen version is overridden with the lockfile-matching CLI. Packaging-changing
   environment overrides are rejected. The fixture builder separately uses
-  esbuild **0.27.3**.
-- Miniflare **4.20260302.0** / workerd **2026-03-02** via the npm lockfile;
+  esbuild **0.28.2**.
+- Miniflare **4.20260730.0** / workerd **1.20260730.1** via the npm lockfile;
   compatibility date **2024-09-23** and `nodejs_compat` match Wrangler.
 - Restate **1.8.1**, pinned by digest in `compose.yaml`; Rust SDK and dependencies
   are pinned in `Cargo.lock`. Packaging uses Python **3.12.9** in CI (local Python

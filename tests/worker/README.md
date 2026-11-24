@@ -117,7 +117,7 @@ npm test --prefix tests/worker
 
 `WASM_BINDGEN=/absolute/path/to/wasm-bindgen` selects a downloaded CLI without
 installing it globally. `CARGO_TARGET_DIR` is supported. The pinned npm lockfile
-installs Miniflare 4.20260302.0 (workerd 2026-03-02) and esbuild 0.27.3.
+installs Miniflare 4.20260730.0 (workerd 1.20260730.1) and esbuild 0.28.2.
 
 `npm test` rebuilds the actual web Worker with:
 

@@ -36,8 +36,8 @@ Pins:
   `e882e9e04f9ad9942b4fe7f3788999a521dfa336` from the maintainer's
   [upstream PR #128](https://github.com/restatedev/sdk-rust/pull/128).
   Shared core **7.0.3**; `Cargo.lock` pins transitive dependencies.
-- worker-rs **0.8.1**, Miniflare **4.20260302.0**, workerd **2026-03-02**,
-  esbuild **0.27.3** from the checked-in npm lockfile.
+- worker-rs **0.8.1**, Miniflare **4.20260730.0**, workerd **1.20260730.1**,
+  esbuild **0.28.2** from the checked-in npm lockfile.
 - Compatibility date **2024-09-23**, `nodejs_compat`, matching both Wrangler
   configurations. Wrangler/worker-build is not used by this local runner: it
   builds Rust Wasm, runs matching wasm-bindgen, and bundles its imports directly.
