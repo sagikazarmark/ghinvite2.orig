@@ -499,12 +499,37 @@ impl LiveConfig {
                 problems.push(format!("{a} and {b} go together"));
             }
         }
+        // The normaliser turns each name into its own placeholder, so two
+        // equal names (say a repository and a team both called `sandbox`)
+        // would be recorded as one.
+        let names = [
+            "OCTOEMU_LIVE_ORG",
+            "OCTOEMU_LIVE_REPO",
+            "OCTOEMU_LIVE_TEAM",
+            "OCTOEMU_LIVE_INVITEE_LOGIN",
+            "OCTOEMU_LIVE_POLICY_ORG",
+            "OCTOEMU_LIVE_POLICY_REPO",
+            "OCTOEMU_LIVE_NO_SEAT_ORG",
+        ];
+        for (index, a) in names.iter().enumerate() {
+            for b in &names[index + 1..] {
+                if let (Some(x), Some(y)) = (values.get(*a), values.get(*b))
+                    && !x.is_empty()
+                    && x.eq_ignore_ascii_case(y)
+                {
+                    problems.push(format!("{a} and {b} must differ"));
+                }
+            }
+        }
         if !problems.is_empty() {
             return Err(format!("live env file: {}", problems.join("; ")));
         }
         let key_path = PathBuf::from(&values["OCTOEMU_LIVE_APP_PRIVATE_KEY_PATH"]);
         let private_key = std::fs::read_to_string(&key_path)
             .map_err(|error| format!("{}: {error}", key_path.display()))?;
+        // The PEM parser is strict, and a key that went through a download
+        // or a copy often gains a blank line or a carriage return.
+        let private_key = format!("{}\n", private_key.trim().replace("\r\n", "\n"));
         Ok(Self {
             values,
             private_key,
@@ -665,6 +690,8 @@ mod tests {
             ("OCTOEMU_LIVE_APP_ID".to_owned(), "x".to_owned()),
             ("OCTOEMU_LIVE_SURPRISE".to_owned(), "1".to_owned()),
             ("OCTOEMU_LIVE_POLICY_ORG".to_owned(), "o".to_owned()),
+            ("OCTOEMU_LIVE_REPO".to_owned(), "sandbox".to_owned()),
+            ("OCTOEMU_LIVE_TEAM".to_owned(), "Sandbox".to_owned()),
         ]))
         .unwrap_err();
         for expected in [
@@ -672,6 +699,7 @@ mod tests {
             "OCTOEMU_LIVE_ORG is required",
             "OCTOEMU_LIVE_APP_ID must be a number",
             "go together",
+            "OCTOEMU_LIVE_REPO and OCTOEMU_LIVE_TEAM must differ",
         ] {
             assert!(error.contains(expected), "{error}");
         }
@@ -710,13 +738,15 @@ mod tests {
             .join("target")
             .join(format!("live-env-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("app.pem"), EMULATOR_PRIVATE_KEY).unwrap();
+        // A blank line after the key, as a download or a copy may leave.
+        std::fs::write(dir.join("app.pem"), format!("{EMULATOR_PRIVATE_KEY}\n")).unwrap();
         let mut text = String::new();
         for (key, required) in LIVE_KEYS {
+            // Every value distinct: names must differ.
             let value = match *key {
-                "OCTOEMU_LIVE_APP_PRIVATE_KEY_PATH" => "app.pem",
-                "OCTOEMU_LIVE_APP_ID" | "OCTOEMU_LIVE_INSTALLATION_ID" => "1",
-                _ if *required => "x",
+                "OCTOEMU_LIVE_APP_PRIVATE_KEY_PATH" => "app.pem".to_owned(),
+                "OCTOEMU_LIVE_APP_ID" | "OCTOEMU_LIVE_INSTALLATION_ID" => "1".to_owned(),
+                _ if *required => key.to_lowercase(),
                 _ => continue,
             };
             text.push_str(&format!("{key}={value}\n"));
@@ -724,10 +754,14 @@ mod tests {
         std::fs::write(dir.join("live.env"), text).unwrap();
         let loaded = LiveConfig::load(&dir.join("live.env"));
         std::fs::remove_dir_all(&dir).unwrap();
-        assert_eq!(
-            loaded.unwrap().world().app.private_key,
-            EMULATOR_PRIVATE_KEY
-        );
+        let key = loaded.unwrap().world().app.private_key;
+        assert_eq!(key, EMULATOR_PRIVATE_KEY);
+        crate::ctx::Ctx::sign_with(
+            &key,
+            &serde_json::json!({"alg": "RS256"}),
+            &serde_json::json!({}),
+        )
+        .unwrap();
     }
 
     #[test]

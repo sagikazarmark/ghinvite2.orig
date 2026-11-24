@@ -86,7 +86,10 @@ gh api -X POST "/orgs/$ORG/teams" -f name="$TEAM" -f privacy=closed --jq .slug
 ```
 
 The team's slug must equal `$TEAM`. If GitHub changed it (for example
-because of capital letters), set `TEAM` to the printed slug.
+because of capital letters), set `TEAM` to the printed slug. Every name
+must differ from the others (the org, repository, team and invitee): the
+recorded snapshots replace each one with its own placeholder, so the suite
+refuses two equal names.
 
 ## 3. The fidelity App
 
