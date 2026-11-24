@@ -11,12 +11,17 @@ once by the approved command; another ID cannot create another writer.
   terminal/stopped owners send removal hints. The schedule verifies each hint
   against the current shared owner snapshot, so stale or reordered hints cannot
   remove live work or resurrect terminal work.
-- `Reconcile/sweep` queues one repository walk per tracked numeric target. A walk
-  completes all invitation pages once, then separate `observe_next` invocations
+- `Reconcile/sweep` queues one repository walk per tracked numeric target (at most
+  25 per run, rotating). A walk completes all invitation pages once (at most 40),
+  then separate `observe_next` invocations
   inspect one delivery each and send evidence to its owner. Every absent known
   invitation requires current installation and numeric repository verification
   in that observation. Unknown creation resolves only from positive presence.
-  Failed/partial reads supply no evidence and are retried by the next sweep.
+  Failed/partial reads supply no evidence and are retried by the next sweep; the
+  walk reports them to its schedule as failed or throttled.
+- A known invitation that a fresh complete listing still shows more than 7 days
+  after the `created_at` in that listing settles Expired, as does GitHub's own
+  `expired: true`. A disappeared invitation is Accepted or Declined, never Expired.
 - The owner retains the winning terminal transition. Independent `DeliveryProjection`
   execution applies one revision lineage. The SQLx transaction / D1 batch commits
   the complete snapshot, create audit and settlement audit together.
@@ -42,7 +47,9 @@ repository read leaves lifecycle unchanged. Installation/account/repository iden
 is verified before deletion and rechecked after a 404. A withdrawal naming a retired
 installation cannot borrow its replacement's credentials. `tick_expire` remains an
 explicit operation with its existing pending-invitation evidence requirement; request
-decision deadlines do not schedule it. Automatic lifecycle cadence remains in #86.
+decision deadlines do not schedule it. Automatic lifecycle cadence is the retained
+sweep chain and its hourly watchdog ([below](#automatic-lifecycle-reconciliation-86),
+[ADR 0012](adr/0012-retained-sweep-chains-with-an-hourly-watchdog.md)).
 
 The post-settlement SQL fence is defense in depth over the projected snapshot.
 Retain owner state, HTTP fences, webhook routing receipts and audit history together.
@@ -234,7 +241,8 @@ wire are incompatible with old retained journals. Pin old invocations to their
 original endpoint or drain them. Existing pending owners must finish on that
 endpoint or be explicitly enrolled through validated registration before relying
 on the new schedule; merely deploying this code does not migrate that work.
-Organization sweeps and requester-triggered refresh remain M1 work. Direct
+Requester-triggered refresh remains M1 work; organization sweeps run when organization
+delivery is enabled. Direct
 collaborator acceptance checks remain behind SP-07; current evidence records
 verified effective role. No live GitHub or production rollout is claimed.
 
@@ -247,3 +255,47 @@ older serving/pinned artifact that still calls this SQL; current source's lack
 of callers cannot establish deployed compatibility. Legacy private delivery
 handlers remain registered independently of this table removal. Local tests do
 not claim remote migration or release.
+
+## Automatic lifecycle reconciliation (#86)
+
+The accepted contract and its choices are [ADR 0012](adr/0012-retained-sweep-chains-with-an-hourly-watchdog.md).
+The retained chain above is the only scheduler. The web's hourly cron (`5 * * * *`,
+native maintenance loop alike) sends the active installation accounts it projects
+to `SweepWatchdog/check`, which re-arms any missing chain, and any chain due more
+than 15 minutes ago, through `ensure_scheduled`. However many runs were missed, an
+overdue chain catches up with one immediate run under a new token; older delayed
+runs become inert. Repeated or overlapping checks, stale timers and repeated
+`ensure_scheduled` calls are no-ops on a healthy chain.
+
+`run` no longer ends the chain when its fan-out is refused: it counts a failed
+sweep and schedules the successor. Walks report failed reads and throttling with
+one-way `SweepSchedule/report` messages bound to their run token. Throttling defers
+the next run to `min(24 h, max(guidance, 1 h × 2^(n−1)))` for the n-th consecutive
+throttled run, and registrations cannot pull the chain inside that deferral.
+Each complete check folds into `sweep_digest_days` (oldest overdue chain, chains
+with a failed sweep in the last day, latest failure, re-arm count); an incomplete
+check logs `sweep_watchdog_failed`, fails the scheduled event and records nothing.
+`GH_SWEEP_WATCHDOG_ENABLED` defaults on for development/test roots and off in
+production; [deployment](deploy.md#sweep-watchdog-86) owns enabling it (#61).
+
+Organization chains use the same watchdog. An organization invitation listed,
+pending or failed, more than 7 days after creation settles Expired; a failed-list
+entry stamped inside its lifetime stays unclassified.
+
+`tests/sweep_schedule.rs` rehearses, on real Restate with a journaled fixture
+clock and octoemu: a missed webhook settled by the chain; three days of scheduler
+downtime repaired by one watchdog catch-up sweep; duplicate checks, stale and
+spent tokens and repeated `ensure_scheduled`; consecutive throttling with doubling
+deferral and reset; a failed later page counted once and reported; reinstall onto
+a replacement installation without forking the chain; and expiry of an invitation
+GitHub still lists eight days after creation. `tests/worker/daily-digest.mjs` runs
+the actual scheduled Worker against a recorded authenticated ingress and real D1.
+
+```sh
+RESTATE_SERVER_BIN=/path/to/restate-server cargo test --locked -p ghinvite-workflows --features integration --test sweep_schedule
+cargo test --locked -p ghinvite-web --test sweep_watchdog
+npm run test:daily-digest --prefix tests/worker
+```
+
+The ID-21 note above applies: the new handlers, named clock reads and
+`Listed.created_at` field need endpoint pinning or draining for retained journals.

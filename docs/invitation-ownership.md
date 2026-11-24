@@ -17,7 +17,9 @@ before acknowledgement. Approval retains the immutable manifest before dispatch.
 Repository sends progress independently. Submission acknowledgement is not GitHub
 success. Current numeric installation/account/repository/requester identities are
 verified before effects. Repository member events do not dispatch delivery commands. Retained sweeps
-verify known upstream invitation and membership evidence before settlement.
+verify known upstream invitation and membership evidence before settlement. A
+known invitation still listed more than 7 days after creation settles Expired;
+one that disappeared never does, and absence never resolves an uncertain create.
 Organization events use the separate app-scoped routing receipt protocol.
 
 [ADR0011](adr/0011-canonical-delivery-identity-with-retained-audit-compatibility.md)
@@ -165,5 +167,8 @@ own disposable fixtures.
    as rollback; forward repair preserves coordinated authority and external effects.
    Production opening remains the maintainer's #61 decision.
 
-Automatic scheduler operation remains #86. Neither #86 nor #61 is completed by
-this verification or by fixture changes.
+Automatic scheduler operation follows [ADR 0012](adr/0012-retained-sweep-chains-with-an-hourly-watchdog.md):
+retained `SweepSchedule` chains, re-armed by the web's hourly watchdog. Close the
+scheduled producer with the other producers in step 1. Enabling it in production
+(`GH_SWEEP_WATCHDOG_ENABLED`, [deployment](deploy.md#sweep-watchdog-86)) remains
+#61, which this verification and these fixture changes do not complete.

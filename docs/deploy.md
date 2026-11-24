@@ -789,6 +789,45 @@ without the source link's share. Unknown old deletion or removal work blocks
 reissue. Enabling the setting does not satisfy live GitHub activation probes or
 retained endpoint migration gates.
 
+### Sweep watchdog (#86)
+
+Settlement of pending GitHub invitations runs on the retained
+`SweepSchedule/<app>:<account>` chains in Restate: hourly while an account has
+work waiting on GitHub, daily otherwise. Nothing needs configuring for that. The
+web Worker's existing hourly cron (`5 * * * *` in `wrangler/web.toml`) can also
+act as the chains' watchdog. Each run sends the projected active installation
+accounts, in batches of 100, over the authenticated ingress (`RESTATE_INGRESS_URL`,
+`RESTATE_INGRESS_TOKEN`) to `SweepWatchdog/check`. That check re-arms any chain
+that is missing or overdue by more than 15 minutes, with one catch-up sweep. It
+uses no new secrets and makes no GitHub calls.
+
+`GH_SWEEP_WATCHDOG_ENABLED` takes only `true` or `false`. If unset, it is on for
+the native `--local-dev` server and runtime-test Worker builds, and off for
+ordinary Worker builds (including `wrangler dev`) and the native production root.
+Set it to `true` in `.dev.vars` to exercise it under `wrangler dev`.
+The template sets `false`. Enabling it in production is part of #61. Before you
+enable it:
+
+1. Deploy the matching workflow endpoint (it binds `SweepWatchdog` and
+   `SweepSchedule.report`), and pin or drain older endpoints per ID-21.
+2. Apply migration 0029 (`sweep_digest_days`) through both Workers' bindings.
+3. Set `GH_SWEEP_WATCHDOG_ENABLED = "true"` in `wrangler/web.toml` `[vars]` (or
+   the native server's environment) and deploy web.
+4. After the next minute-five run, confirm one row for today:
+   `SELECT * FROM sweep_digest_days ORDER BY day DESC LIMIT 1`. `checks` counts
+   the complete checks of the day. `oldest_overdue_schedule` and
+   `oldest_overdue_due_at` name the oldest chain that had to be re-armed.
+   `failed_schedules` and `latest_failed_schedule` show sweeps that failed in
+   the previous 24 hours.
+
+A check that cannot read the installation projection, or whose ingress batch is
+refused, logs the fixed `sweep_watchdog_failed`, fails the scheduled event (so it
+shows in Cloudflare's cron reporting) and records nothing. The next hour retries
+it. Re-arming is idempotent, so retries, overlapping runs and the native maintenance
+loop running alongside the Worker cannot fork a chain. There is no notification
+channel (#46): operators read the digest and the cron reports. Turning the flag
+off stops only the watchdog. Retained chains keep running in Restate.
+
 ### Continuation keyring rotation
 
 Use the [verified CAS sweep and separate full-pass completion gate](continuation-keyring-rotation.md). Retained expired D1 rows are included; the session KV TTL rule does not substitute for this gate.

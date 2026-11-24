@@ -176,11 +176,14 @@ protocol change; register the matching create and projection handlers together.
 
 The settlement sweep waits a limit out once per account, not once per row or
 once per sweep: a quota belongs to the installation, so one wait covers that
-account's remaining rows and says nothing about any other. An account throttled
-again after its wait has its remaining rows left to the next sweep rather than
-spending more of a quota it has already run out of. Either way the wait is a
-durable continuation or a service-side timer, never a held retry: no handler
-keeps an invitation object's lock across a rate-limit window.
+account's remaining rows and says nothing about any other. A throttled walk
+reports to its account's `SweepSchedule`, which defers the whole chain, once per
+run, by `min(24 h, max(guidance, 1 h × 2^(n−1)))` for the n-th consecutive
+throttled run ([ADR 0012](adr/0012-retained-sweep-chains-with-an-hourly-watchdog.md)).
+The remaining rows are left to that deferred run rather than spending more of a
+quota the account has already run out of. Either way the wait is a durable delayed
+run, never a held retry: no handler keeps an invitation object's lock across a
+rate-limit window.
 
 Only a response classifies. Transport errors, timeouts, and every other uncertain
 result stay outcome-unknown and keep the write fence, so throttling handling can

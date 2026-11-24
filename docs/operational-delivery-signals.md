@@ -212,8 +212,9 @@ alert delivery. Scheduler and Console route acceptance are separate boundaries.
 
 ### Scheduled recording and Console presentation
 
-The web Worker's exported `scheduled` handler uses actual processing UTC time
-and only the DB binding. Wrangler configures `5 * * * *`: the first successful
+The web Worker's exported `scheduled` handler uses actual processing UTC time.
+The digest reads only the DB binding; the separate sweep watchdog (#86, [ADR 0012](adr/0012-retained-sweep-chains-with-an-hourly-watchdog.md))
+is its only ingress traffic. Wrangler configures `5 * * * *`: the first successful
 run records the day, and later runs preserve that snapshot. A SQL failure
 rejects the scheduled event and emits the fixed `daily_delivery_digest_failed`
 diagnostic. It never reports a successful empty observation after an error.

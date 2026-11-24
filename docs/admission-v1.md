@@ -128,4 +128,6 @@ Runners own isolated pinned Restate instances and fresh SQLite; `authoritative_a
 spawns one native server per test (see [local testing](local-testing.md)). See
 [local testing](local-testing.md) for tools and bounds, and the
 [clean prelaunch replacement](invitation-ownership.md#clean-prelaunch-replacement)
-for setup. Automatic scheduling remains #86; rollout remains #61.
+for setup. Automatic lifecycle scheduling is the retained sweep chain with its
+hourly watchdog ([ADR 0012](adr/0012-retained-sweep-chains-with-an-hourly-watchdog.md));
+its production enablement and rollout remain #61.
