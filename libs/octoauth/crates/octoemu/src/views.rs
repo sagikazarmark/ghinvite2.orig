@@ -601,9 +601,12 @@ impl View<'_> {
 
     /// The App whose bot account is `login` (`{slug}[bot]`).
     fn bot_app(&self, login: &str) -> Option<u64> {
-        let slug = login
-            .strip_suffix("[bot]")
-            .or_else(|| login.strip_suffix("[BOT]"))?;
+        // Logins are case-insensitive, the suffix too (`[Bot]`).
+        let split = login.len().checked_sub("[bot]".len())?;
+        let (slug, suffix) = (login.get(..split)?, login.get(split..)?);
+        if !suffix.eq_ignore_ascii_case("[bot]") {
+            return None;
+        }
         self.world
             .apps
             .iter()

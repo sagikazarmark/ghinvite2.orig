@@ -380,6 +380,16 @@ async fn the_app_its_bot_and_its_installations_in_githubs_shapes() {
     assert_eq!(profile.status, StatusCode::OK);
     assert_eq!(profile.body["id"], bot["id"]);
     assert_eq!(profile.body["type"], "Bot");
+    // Logins are case-insensitive, the `[bot]` suffix too.
+    let mixed = call(
+        reqwest::Method::GET,
+        &format!("{base}/users/Invite-Bot%5BBot%5D"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(mixed.status, StatusCode::OK);
+    assert_eq!(mixed.body["id"], bot["id"]);
     let lifted = call(reqwest::Method::DELETE, &suspend_url, Some(&app), None).await;
     assert_eq!(lifted.status, StatusCode::NO_CONTENT);
     let shown = get(&emulator, "/app/installations/5", &app).await;
