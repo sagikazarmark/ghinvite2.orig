@@ -326,6 +326,35 @@ async fn revoke_uses_retained_preview_and_role_change_skips_without_changing_acc
         409
     );
     assert_eq!(terminal(&f, &created.create.command).await, accepted);
+    // The revoked link still replays the retained preview, and refuses a
+    // fresh one as revoked (410) rather than as an identity conflict (409).
+    assert_eq!(
+        standard_call(
+            &f,
+            "InvitationLink",
+            &link.to_string(),
+            "prepare_access_removal",
+            Some(json!({"link_id":link,"admin":{"account_id":100,"user_id":7},"operation_id":operation})),
+        )
+        .await,
+        preview
+    );
+    let fresh = json!({"link_id":link,"admin":{"account_id":100,"user_id":7},"operation_id":RequestId::new()});
+    assert_eq!(
+        f.h.restate
+            .invoke(
+                &Call::object(
+                    "InvitationLink",
+                    &link.to_string(),
+                    "prepare_access_removal"
+                ),
+                Some(&fresh),
+                None
+            )
+            .await
+            .status,
+        410
+    );
 }
 #[tokio::test]
 async fn acceptance_after_preview_is_excluded_from_exact_removal_capture() {

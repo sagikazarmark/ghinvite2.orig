@@ -31,6 +31,7 @@ impl Observation {
             Err(AuthorityError::Invalid) => "invalid",
             Err(AuthorityError::Missing) => "missing",
             Err(AuthorityError::Conflict) => "conflict",
+            Err(AuthorityError::Revoked) => "revoked",
             Err(AuthorityError::AuthorizationUnavailable) => "authorization_unavailable",
             Err(AuthorityError::Unknown(_)) => "unknown",
         };

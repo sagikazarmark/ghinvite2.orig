@@ -45,7 +45,7 @@ use ghinvite_core::admission::{
 use ghinvite_core::delivery::{DispatchStage, RepositoryProgress};
 use ghinvite_core::invitation_link::{
     AccountAdmin, CreateLink, CreateLinkError, CreateLinkOutcome, GuardrailField, LinkCreated,
-    LinkMetadata, LinkSnapshot, RotateSecret, RotationRefusal, SecretRotated,
+    LinkMetadata, LinkSnapshot, RotateSecret, SecretRotated,
 };
 use ghinvite_core::request_lifecycle::RequestSnapshot;
 use ghinvite_core::request_lifecycle::{DecideRequest, DecisionReceipt, RequestStatus};
@@ -846,8 +846,7 @@ fn answer(inner: &mut Inner, service: &str, key: String, method: &str, body: Val
             }
             let receipt = match link.rotate_secret(command.new_sha256) {
                 Ok(receipt) => receipt,
-                Err(RotationRefusal::Revoked) => return status(409),
-                Err(RotationRefusal::Exhausted) => return status(400),
+                Err(refusal) => return status(refusal.status()),
             };
             inner
                 .rotations

@@ -1122,6 +1122,13 @@ pub struct RotateSecret {
 pub struct SecretRotated {
     pub secret_generation: u32,
 }
+/// The ingress status with which the link authority refuses a command because
+/// the link is revoked. The command changed nothing and bound no identity.
+///
+/// No other link answer uses it, so a caller can tell it from 409, which
+/// always means the operation's identity is bound to different input.
+pub const LINK_REVOKED_STATUS: u16 = 410;
+
 /// Why the authority refuses to rotate a link's secret.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum RotationRefusal {
@@ -1129,4 +1136,14 @@ pub enum RotationRefusal {
     Revoked,
     #[error("secret generation or link revision exhausted")]
     Exhausted,
+}
+
+impl RotationRefusal {
+    /// The ingress status the link authority answers this refusal with.
+    pub const fn status(self) -> u16 {
+        match self {
+            Self::Revoked => LINK_REVOKED_STATUS,
+            Self::Exhausted => 400,
+        }
+    }
 }

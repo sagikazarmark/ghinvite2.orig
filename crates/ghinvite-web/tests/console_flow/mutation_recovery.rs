@@ -1010,3 +1010,87 @@ async fn manual_resume_guardrail_refusal_is_definitive_and_never_extends_expiry(
         link.expires_at
     );
 }
+
+const ROTATION_REVOKED: &str =
+    "This invitation link is revoked, so its URL was not rotated. Nothing was changed.";
+
+#[tokio::test]
+async fn rotating_a_revoked_link_says_it_is_revoked_and_changes_nothing() {
+    let authority = FakeLinkAuthority::start().await;
+    let id = ghinvite_core::InvitationLinkId::new();
+    let mut link = recovery_link(id);
+    link.revoked_at = Some(Utc::now() - Duration::minutes(5));
+    link.revoked_by = Some(42);
+    authority.seed_link(&link);
+    let before = authority.link(id).unwrap();
+    let (app, cookie) = recovery_app(&authority).await;
+    let csrf = common::csrf_token(&app, &cookie).await;
+    let detail = format!("/console/accounts/octocat/links/{id}");
+    // A stale tab still offers the rotation form for the revoked link.
+    let op = ghinvite_core::RequestId::new();
+    let response = post(
+        &app,
+        &cookie,
+        &format!("{detail}/rotate"),
+        &format!("csrf_token={csrf}&operation_id={op}"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(response.headers()["location"], detail);
+    let html = response_html(identity_request(&app, &cookie, "GET", &detail).await).await;
+    assert_eq!(html.matches(ROTATION_REVOKED).count(), 1);
+    assert!(!html.contains("Operation conflict"));
+    assert!(!html.contains("Save this invitation URL"));
+    assert!(authority.applied().is_empty());
+    assert_eq!(authority.link(id).unwrap(), before);
+    // Nothing was applied, so no attempt is left to recover.
+    let html = response_html(
+        identity_request(&app, &cookie, "GET", "/console/accounts/octocat/attempts").await,
+    )
+    .await;
+    assert!(!html.contains(&format!("rotate-{id}-{op}")));
+}
+
+#[tokio::test]
+async fn a_rotation_confirmed_before_revocation_still_replays_its_receipt() {
+    let authority = FakeLinkAuthority::start().await;
+    let id = ghinvite_core::InvitationLinkId::new();
+    authority.seed_link(&recovery_link(id));
+    authority.lose_acknowledgements("rotate_secret");
+    let (app, cookie) = recovery_app(&authority).await;
+    let csrf = common::csrf_token(&app, &cookie).await;
+    let detail = format!("/console/accounts/octocat/links/{id}");
+    let op = ghinvite_core::RequestId::new();
+    let response = post(
+        &app,
+        &cookie,
+        &format!("{detail}/rotate"),
+        &format!("csrf_token={csrf}&operation_id={op}"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let attempt = format!("/console/accounts/octocat/attempts/rotate-{id}-{op}");
+    assert!(response_html(response).await.contains(&attempt));
+    authority.recover("rotate_secret");
+    let response = post(
+        &app,
+        &cookie,
+        &format!("{detail}/revoke"),
+        &format!(
+            "csrf_token={csrf}&operation_id={}",
+            ghinvite_core::RequestId::new()
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert!(authority.link(id).unwrap().revoked_at.is_some());
+    // The retry finds the retained receipt before the revoked link refuses.
+    let response = post(&app, &cookie, &attempt, &format!("csrf_token={csrf}")).await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(response.headers()["location"], detail);
+    let html = response_html(identity_request(&app, &cookie, "GET", &detail).await).await;
+    assert!(html.contains("Rotation confirmed."));
+    assert!(!html.contains(ROTATION_REVOKED));
+    assert_eq!(authority.applied(), ["rotate_secret", "revoke"]);
+    assert_eq!(authority.link(id).unwrap().secret.secret_generation, 2);
+}

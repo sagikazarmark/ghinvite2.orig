@@ -30,6 +30,14 @@ fn key(input: &PrepareAccessRemoval) -> String {
 fn conflict() -> TerminalError {
     TerminalError::new_with_code(409, "access removal preview conflict")
 }
+/// A fresh preview of a revoked link changes nothing; its status tells it
+/// apart from a conflicting operation identity.
+fn revoked() -> TerminalError {
+    TerminalError::new_with_code(
+        ghinvite_core::invitation_link::LINK_REVOKED_STATUS,
+        "link revoked",
+    )
+}
 fn unavailable() -> TerminalError {
     TerminalError::new_with_code(503, "access removal preview unavailable")
 }
@@ -70,7 +78,7 @@ pub(crate) async fn prepare(
         };
     }
     if link.revoked_at.is_some() {
-        return Err(conflict());
+        return Err(revoked());
     }
     let captured_at = crate::clock::now(ctx, "access_preview_time").await?;
     let mut grants = BTreeMap::new();

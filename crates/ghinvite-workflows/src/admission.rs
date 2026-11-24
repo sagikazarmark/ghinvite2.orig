@@ -624,12 +624,11 @@ impl InvitationLink {
                 Err(conflict())
             };
         }
-        let receipt = link
-            .rotate_secret(input.new_sha256)
-            .map_err(|refusal| match refusal {
-                RotationRefusal::Revoked => TerminalError::new_with_code(409, "link revoked"),
-                RotationRefusal::Exhausted => invalid(),
-            })?;
+        // A revoked link answers its own status rather than 409, which only
+        // ever means this operation is bound to different input.
+        let receipt = link.rotate_secret(input.new_sha256).map_err(|refusal| {
+            TerminalError::new_with_code(refusal.status(), refusal.to_string())
+        })?;
         let generation = receipt.secret_generation;
         let now = self.time(&ctx, "rotation_time").await?;
         ctx.set("link", Json(link.clone()));

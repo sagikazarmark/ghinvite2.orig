@@ -628,6 +628,9 @@ fn failed(session: &Session, code: &str, command: &Admit, error: AuthorityError)
             crate::WebError::ConsoleAuthority.into_response()
         }
         AuthorityError::Invalid | AuthorityError::Missing => safe_error(code, error.into()),
+        // Admission never answers it: a requester sees a revoked link only as
+        // unavailable.
+        AuthorityError::Revoked => safe_error(code, crate::WebError::NotFound),
         AuthorityError::Conflict => conflict(session, code, &command.into()),
         AuthorityError::Unknown(_) => unknown(session, code, &command.into()),
     }

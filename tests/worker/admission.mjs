@@ -374,6 +374,15 @@ try {
   assert.equal(revokeConflict.status, 409);
   await revokeConflict.arrayBuffer();
   assert.deepEqual(await command('revoke', revokeCommand(input, id())), { Err: 'revoked' });
+  // A fresh rotation of the revoked link is refused as revoked (410), which
+  // the Console tells apart from an identity conflict (409).
+  const rotateRevoked = await fetch(`${ingress}/InvitationLink/${input.link_id}/rotate_secret`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ link_id: input.link_id, operation_id: id(), admin: input.admin, new_sha256: '4c'.repeat(32) }),
+    signal: AbortSignal.timeout(25_000),
+  });
+  assert.equal(rotateRevoked.status, 410);
+  await rotateRevoked.arrayBuffer();
   assert.deepEqual(await command('admit', attempts[winner]), receipt);
   const conflict = await fetch(`${ingress}/InvitationLink/${input.link_id}/admit`, {
     method: 'POST', headers: { 'content-type': 'application/json' },

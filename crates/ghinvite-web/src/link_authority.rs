@@ -4,8 +4,9 @@
 //! Every call waits for the authority's answer, because that answer is the
 //! decision itself. The authority's documented terminal statuses become
 //! [`AuthorityError::Invalid`], [`AuthorityError::Missing`] and
-//! [`AuthorityError::Conflict`]; every other failure leaves the command's
-//! outcome unknown.
+//! [`AuthorityError::Conflict`], and for the admin commands a revoked link
+//! refuses, [`AuthorityError::Revoked`]; every other failure leaves the
+//! command's outcome unknown.
 use crate::error::IngressFailure;
 use crate::{RestateClient, WebError};
 use ghinvite_core::InvitationLinkId;
@@ -14,7 +15,7 @@ use ghinvite_core::admission::{
     RequesterPage, UpdateMetadata,
 };
 use ghinvite_core::invitation_link::{
-    CreateLink, CreateLinkOutcome, LinkSnapshot, RotateSecret, SecretRotated,
+    CreateLink, CreateLinkOutcome, LINK_REVOKED_STATUS, LinkSnapshot, RotateSecret, SecretRotated,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -38,6 +39,11 @@ pub enum AuthorityError {
     /// The command's identity is bound to different input (409).
     #[error("operation conflict")]
     Conflict,
+    /// The link is revoked, so the command changed nothing and bound no
+    /// identity ([`LINK_REVOKED_STATUS`]). It has its own status so that a
+    /// revoked link is never mistaken for a conflicting operation identity.
+    #[error("link revoked")]
+    Revoked,
     /// No usable answer arrived, so whether the command took effect is
     /// unknown. Always an [`IngressFailure::OutcomeUnknown`].
     #[error(transparent)]
@@ -66,6 +72,9 @@ impl From<AuthorityError> for WebError {
             AuthorityError::Invalid => WebError::BadRequest("Invalid command.".into()),
             AuthorityError::Missing => WebError::NotFound,
             AuthorityError::Conflict => WebError::Conflict,
+            AuthorityError::Revoked => {
+                WebError::BadRequest("This invitation link is revoked. Nothing was changed.".into())
+            }
             AuthorityError::Unknown(failure) => WebError::Restate(failure),
         }
     }
@@ -95,7 +104,7 @@ impl LinkAuthority {
         &self,
         command: ghinvite_core::revocation::PrepareAccessRemoval,
     ) -> Result<ghinvite_core::revocation::AccessRemovalPreview> {
-        self.link(command.link_id, "prepare_access_removal", &command)
+        self.unless_revoked(command.link_id, "prepare_access_removal", &command)
             .await
     }
 
@@ -133,8 +142,11 @@ impl LinkAuthority {
         self.link(command.link_id, "resume", &command).await
     }
 
+    /// A retained rotation replays its receipt even after revocation; a fresh
+    /// one on a revoked link is [`AuthorityError::Revoked`].
     pub async fn rotate_secret(&self, command: RotateSecret) -> Result<SecretRotated> {
-        self.link(command.link_id, "rotate_secret", &command).await
+        self.unless_revoked(command.link_id, "rotate_secret", &command)
+            .await
     }
 
     pub async fn update_metadata(&self, command: UpdateMetadata) -> Result<LinkSnapshot> {
@@ -197,20 +209,30 @@ impl LinkAuthority {
         method: &str,
         input: &I,
     ) -> Result<O> {
-        self.call(LINK, &link_id.to_string(), method, input).await
+        self.client
+            .invoke(LINK, &link_id.to_string(), method, input)
+            .await
+            .map_err(AuthorityError::from_ingress)
     }
 
-    async fn call<I: Serialize, O: DeserializeOwned>(
+    /// [`LinkAuthority::link`] for an admin command the link refuses once it
+    /// is revoked. Only these commands read [`LINK_REVOKED_STATUS`] as
+    /// [`AuthorityError::Revoked`]; a requester's view never learns of it.
+    async fn unless_revoked<I: Serialize, O: DeserializeOwned>(
         &self,
-        service: &str,
-        key: &str,
+        link_id: InvitationLinkId,
         method: &str,
         input: &I,
     ) -> Result<O> {
         self.client
-            .invoke(service, key, method, input)
+            .invoke(LINK, &link_id.to_string(), method, input)
             .await
-            .map_err(AuthorityError::from_ingress)
+            .map_err(|failure| match failure {
+                IngressFailure::Rejected {
+                    status: LINK_REVOKED_STATUS,
+                } => AuthorityError::Revoked,
+                failure => AuthorityError::from_ingress(failure),
+            })
     }
 }
 
@@ -251,20 +273,67 @@ mod tests {
                 .requester_page(&capability(), 2, None)
                 .await
                 .unwrap_err();
-            let actual = match error {
-                AuthorityError::AuthorizationUnavailable => "AuthorizationUnavailable",
-                AuthorityError::Invalid => "Invalid",
-                AuthorityError::Missing => "Missing",
-                AuthorityError::Conflict => "Conflict",
-                AuthorityError::Unknown(_) => "Unknown",
-            };
-            assert_eq!(actual, expected, "HTTP {status}");
+            assert_eq!(name(&error), expected, "HTTP {status}");
+            let error = authority.rotate_secret(rotation()).await.unwrap_err();
+            assert_eq!(name(&error), expected, "HTTP {status}");
+        }
+    }
+
+    fn name(error: &AuthorityError) -> &'static str {
+        match error {
+            AuthorityError::AuthorizationUnavailable => "AuthorizationUnavailable",
+            AuthorityError::Invalid => "Invalid",
+            AuthorityError::Missing => "Missing",
+            AuthorityError::Conflict => "Conflict",
+            AuthorityError::Revoked => "Revoked",
+            AuthorityError::Unknown(_) => "Unknown",
+        }
+    }
+
+    fn rotation() -> RotateSecret {
+        RotateSecret {
+            link_id: LINK_ID.parse().unwrap(),
+            operation_id: ghinvite_core::RequestId::new()
+                .to_string()
+                .try_into()
+                .unwrap(),
+            admin: ghinvite_core::invitation_link::AccountAdmin {
+                account_id: 1,
+                user_id: 2,
+            },
+            new_sha256: [42; 32].into(),
         }
     }
 
     #[tokio::test]
+    async fn only_the_commands_a_revoked_link_refuses_read_it_as_revoked() {
+        let (_ingress, authority) =
+            authority_answering(ResponseTemplate::new(LINK_REVOKED_STATUS)).await;
+        let error = authority.rotate_secret(rotation()).await.unwrap_err();
+        assert_eq!(name(&error), "Revoked");
+        let error = authority
+            .prepare_access_removal(ghinvite_core::revocation::PrepareAccessRemoval {
+                link_id: LINK_ID.parse().unwrap(),
+                admin: rotation().admin,
+                operation_id: ghinvite_core::RequestId::new()
+                    .to_string()
+                    .try_into()
+                    .unwrap(),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(name(&error), "Revoked");
+        // No requester handler answers it, so it stays an unknown outcome there.
+        let error = authority
+            .requester_page(&capability(), 2, None)
+            .await
+            .unwrap_err();
+        assert_eq!(name(&error), "Unknown");
+    }
+
+    #[tokio::test]
     async fn any_other_status_leaves_the_outcome_unknown() {
-        for status in [401, 403, 429, 500, 502, 503] {
+        for status in [401, 403, 410, 429, 500, 502, 503] {
             let (_ingress, authority) = authority_answering(
                 ResponseTemplate::new(status).set_body_string("upstream diagnostics"),
             )
@@ -398,6 +467,10 @@ mod tests {
         assert!(matches!(
             WebError::from(AuthorityError::Conflict),
             WebError::Conflict
+        ));
+        assert!(matches!(
+            WebError::from(AuthorityError::Revoked),
+            WebError::BadRequest(message) if message.contains("revoked")
         ));
         let failure = IngressFailure::unreachable("ingress unreachable");
         assert!(matches!(

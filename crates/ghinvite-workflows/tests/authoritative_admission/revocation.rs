@@ -144,6 +144,54 @@ async fn revoke_cascade_freezes_receipts_counts_and_only_cancels_pending_request
 }
 
 #[tokio::test]
+async fn a_revoked_link_refuses_fresh_rotation_as_revoked_and_replays_retained_ones() {
+    let rt = Runtime::start().await;
+    let id = rt.create(Some(2)).await;
+    let admin = json!({"account_id":100,"user_id":7});
+    let rotation = json!({"link_id":id,"operation_id":RequestId::new(),"admin":admin,
+        "new_sha256":"3b".repeat(32)});
+    let rotated = rt
+        .ok("InvitationLink", id, "rotate_secret", &rotation)
+        .await;
+    assert_eq!(rotated, json!({"secret_generation":2}));
+    let revoked = rt
+        .ok("InvitationLink", id, "revoke", &revoke_command(id))
+        .await;
+    assert!(revoked["Ok"].is_object(), "{revoked}");
+    let status_input = json!({"link_id":id,"admin":admin});
+    let before = rt
+        .ok("InvitationLink", id, "link_status", &status_input)
+        .await;
+    let status = |input: Value| {
+        let request = rt.call("InvitationLink", id, "rotate_secret", &input);
+        async move { request.send().await.unwrap().status().as_u16() }
+    };
+    // A rotation confirmed before revocation replays its retained receipt.
+    assert_eq!(
+        rt.ok("InvitationLink", id, "rotate_secret", &rotation)
+            .await,
+        rotated
+    );
+    // A fresh rotation is refused as revoked, distinct from an identity
+    // conflict, and the refusal binds nothing: it answers the same again.
+    let fresh = json!({"link_id":id,"operation_id":RequestId::new(),"admin":admin,
+        "new_sha256":"4c".repeat(32)});
+    assert_eq!(status(fresh.clone()).await, 410);
+    assert_eq!(status(fresh).await, 410);
+    // The retained rotation's identity stays bound to its original input.
+    let mut changed = rotation.clone();
+    changed["new_sha256"] = json!("4c".repeat(32));
+    assert_eq!(status(changed).await, 409);
+    assert_eq!(
+        rt.ok("InvitationLink", id, "link_status", &status_input)
+            .await,
+        before,
+        "nothing changed"
+    );
+    rt.harness.finish().await;
+}
+
+#[tokio::test]
 async fn explicit_m1_composition_revoke_reaches_created_delivery_and_fenced_delete() {
     let rt = Runtime::start_mode(true).await;
     let id = rt.create(Some(20)).await;

@@ -15,6 +15,8 @@ const REVOKED: &str = "Invitation link stopped accepting new invitation requests
 pub(super) const CREATE_REJECTED: &str =
     "The invitation link could not be created with these values. Review them and try again.";
 const REVOKE_REJECTED: &str = "This invitation link could not be stopped. Reload it and try again.";
+const ROTATION_REVOKED: &str =
+    "This invitation link is revoked, so its URL was not rotated. Nothing was changed.";
 
 /// A definitive creation rejection. A typed business refusal binds the old
 /// creation identity, so corrected input must get a fresh one. Malformed input
@@ -589,6 +591,17 @@ pub(super) async fn submit_with_secret(
         }
         Command::Rotate(c) => {
             let result = state.link_authority.rotate_secret(c.clone()).await;
+            // A stale tab rotating a revoked link: the authority changed
+            // nothing and bound no identity, so nothing is left to recover.
+            if let Err(AuthorityError::Revoked) = result {
+                release(state, admin, &command).await;
+                flash(admin, session::FlashLevel::Error, ROTATION_REVOKED).await;
+                return Ok(Redirect::to(&format!(
+                    "/console/accounts/{}/links/{}",
+                    admin.account.account_login, c.link_id
+                ))
+                .into_response());
+            }
             if let (Ok(rotated), Some(secret)) = (&result, secret) {
                 return Ok(register_and_show(
                     state,
