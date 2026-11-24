@@ -153,6 +153,7 @@ mod tests {
         let evidence = Evidence::Listed {
             upstream_id: 99,
             expired: false,
+            created_at: None,
         };
         let mut observation = Observation::new(&snapshot, at, evidence);
         assert!(current_observation(&snapshot, &observation));
@@ -168,6 +169,7 @@ mod tests {
         observation.evidence = Evidence::Listed {
             upstream_id: 100,
             expired: false,
+            created_at: None,
         };
         assert!(!current_observation(&snapshot, &observation));
         for (available, role, expected) in [

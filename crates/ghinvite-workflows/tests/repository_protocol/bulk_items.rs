@@ -285,6 +285,7 @@ async fn bulk_callback_reissue_uses_current_manifest_and_discards_old_generation
         ghinvite_workflows::settlement_policy::Evidence::Listed {
             upstream_id: 99,
             expired: true,
+            created_at: None,
         },
     );
     cancel::rpc(

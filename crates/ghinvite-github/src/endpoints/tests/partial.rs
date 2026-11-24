@@ -382,3 +382,30 @@ async fn generic_single_call_preserves_bounded_numeric_sso_evidence_without_deco
         mock.assert_exhausted();
     }
 }
+
+#[tokio::test]
+async fn a_page_budget_completes_within_it_and_fails_past_it_without_a_prefix() {
+    let cred = installation();
+    let mock = MockTransport::scripted(vec![page(1, None, true), page(2, None, false)]);
+    let env = env(&mock);
+    let rest = Rest::new(&env, &cred);
+    assert_eq!(
+        rest.list_all_within::<usize>(Endpoint::ListRepoInvitations, path(), &[], 2)
+            .await
+            .unwrap(),
+        vec![1, 2]
+    );
+    mock.assert_exhausted();
+    // A third page exists: the two-page walk is incomplete, and its third
+    // request is never sent.
+    let mock = MockTransport::scripted(vec![page(1, None, true), page(2, None, true)]);
+    let env = super::env(&mock);
+    let rest = Rest::new(&env, &cred);
+    assert_eq!(
+        rest.list_all_within::<usize>(Endpoint::ListRepoInvitations, path(), &[], 2)
+            .await
+            .unwrap_err(),
+        ApiError::Decode { what: "pagination" }
+    );
+    mock.assert_exhausted();
+}

@@ -37,6 +37,7 @@ pub mod request_control;
 pub mod request_lifecycle;
 pub mod revocation;
 pub mod storage;
+pub mod sweep_health;
 pub mod targets;
 pub mod user;
 

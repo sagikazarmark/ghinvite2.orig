@@ -127,6 +127,7 @@ fn uncertain_creation_requires_positive_invitee_presence() {
         Evidence::Listed {
             upstream_id: 99,
             expired: false,
+            created_at: None,
         },
         Evidence::FailedInvitation {
             upstream_id: 99,
@@ -172,7 +173,8 @@ fn known_identity_expiry_and_foreign_invitations_share_settlement_rules() {
                         &snapshot,
                         Evidence::Listed {
                             upstream_id: id,
-                            expired
+                            expired,
+                            created_at: None,
                         },
                         false
                     )),
@@ -327,4 +329,76 @@ fn stopping_foreign_tracking_does_not_create_an_upstream_settlement() {
     assert!(!can_withdraw(&snapshot));
     assert!(snapshot.settlement.is_none());
     assert!(snapshot.create.outcome.tracked_foreign());
+}
+
+#[test]
+fn still_listed_past_githubs_lifetime_is_expired_and_absence_never_is() {
+    let created: DateTime<Utc> = "2026-05-04T12:00:00Z".parse().unwrap();
+    let lifetime = chrono::Duration::days(7);
+    let listed = |upstream_id, created_at| Evidence::Listed {
+        upstream_id,
+        expired: false,
+        created_at,
+    };
+    let observed = |snapshot: &DeliverySnapshot, at, evidence| {
+        evaluate(
+            snapshot,
+            &Observation::new(snapshot, at, evidence),
+            AcceptancePolicy::default(),
+        )
+    };
+    for outcome in [
+        CreateOutcome::Created { upstream_id: 99 },
+        CreateOutcome::AlreadyPending {
+            upstream_id: 99,
+            permission: RepoRole::Write,
+        },
+    ] {
+        let snapshot = snapshot(outcome);
+        assert_eq!(
+            observed(&snapshot, created + lifetime, listed(99, Some(created))),
+            ReconcileDecision::NoChange,
+            "exactly seven days is still pending"
+        );
+        assert_eq!(
+            observed(
+                &snapshot,
+                created + lifetime + chrono::Duration::seconds(1),
+                listed(99, Some(created))
+            ),
+            ReconcileDecision::Settle {
+                state: InvitationState::Expired,
+                provenance: Provenance::ListedPastLifetime {
+                    created_at: created
+                },
+            }
+        );
+        let late = created + chrono::Duration::days(30);
+        for evidence in [listed(99, None), listed(100, Some(created))] {
+            assert_eq!(
+                observed(&snapshot, late, evidence),
+                ReconcileDecision::NoChange,
+                "only this listing's own creation time of this invitation counts"
+            );
+        }
+        assert_eq!(
+            state(observed(
+                &snapshot,
+                late,
+                absent(Some(EffectiveRole::None), None, true)
+            )),
+            Some(InvitationState::Declined),
+            "a known invitation that disappeared is never Expired"
+        );
+    }
+    let unknown = snapshot(CreateOutcome::OutcomeUnknown);
+    assert_eq!(
+        observed(
+            &unknown,
+            created + chrono::Duration::days(30),
+            listed(99, Some(created))
+        ),
+        ReconcileDecision::NoChange,
+        "an uncertain create resolves only from invitee presence"
+    );
 }

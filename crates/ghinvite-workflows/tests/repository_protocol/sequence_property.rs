@@ -145,12 +145,14 @@ async fn observe(runtime: &Runtime, command: &CreateCommand, action: Action) {
                 ObservationEvidence::Listed {
                     upstream_id: 99,
                     expired: false,
+                    created_at: None,
                 }
             }
         }
         Action::Expired => ObservationEvidence::Listed {
             upstream_id: 99,
             expired: true,
+            created_at: None,
         },
         Action::Accepted => ObservationEvidence::Absent {
             availability_verified: true,

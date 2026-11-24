@@ -247,6 +247,26 @@ pub async fn list_failed_invitations(
     let e = Endpoint::ListFailedOrgInvitations;
     rest.list_all(e, e.meta().path.seg(org), &[]).await
 }
+/// [`list_invitations`] that fails past `max_pages` pages.
+pub async fn list_invitations_within(
+    rest: &Rest<'_>,
+    org: &str,
+    max_pages: usize,
+) -> Result<Vec<OrganizationInvitation>, ApiError> {
+    let e = Endpoint::ListOrgInvitations;
+    rest.list_all_within(e, e.meta().path.seg(org), &[], max_pages)
+        .await
+}
+/// [`list_failed_invitations`] that fails past `max_pages` pages.
+pub async fn list_failed_invitations_within(
+    rest: &Rest<'_>,
+    org: &str,
+    max_pages: usize,
+) -> Result<Vec<FailedOrganizationInvitation>, ApiError> {
+    let e = Endpoint::ListFailedOrgInvitations;
+    rest.list_all_within(e, e.meta().path.seg(org), &[], max_pages)
+        .await
+}
 /// Create an organization invitation using explicit recipient, role and team identifiers.
 pub async fn create_invitation(
     rest: &Rest<'_>,

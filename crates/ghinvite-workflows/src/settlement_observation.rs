@@ -25,15 +25,25 @@ pub struct ListedInvitation {
     pub expired: bool,
 }
 pub async fn list(installation: &Rest<'_>, name: &str) -> Result<Vec<ListedInvitation>, ApiError> {
+    list_within(installation, name, usize::MAX).await
+}
+
+/// [`list`] that fails instead of reading more than `max_pages` pages.
+pub async fn list_within(
+    installation: &Rest<'_>,
+    name: &str,
+    max_pages: usize,
+) -> Result<Vec<ListedInvitation>, ApiError> {
     let identity = RepositoryIdentity::parse(name.to_owned()).map_err(|_| ApiError::Decode {
         what: "repository_identity",
     })?;
-    endpoints::list_repo_invitations(
+    endpoints::list_repo_invitations_within(
         installation,
         Repository {
             owner: identity.owner(),
             name: identity.name(),
         },
+        max_pages,
     )
     .await?
     .into_iter()
@@ -153,6 +163,7 @@ pub async fn observe_listed(
             Some(_) => Evidence::Listed {
                 upstream_id: invitation.id,
                 expired: invitation.expired,
+                created_at: invitation.created_at,
             },
             None => Evidence::FoundByInvitee {
                 upstream_id: invitation.id,

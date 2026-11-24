@@ -60,6 +60,12 @@ pub fn bind(builder: Builder, state: AppState) -> Builder {
             #[cfg(feature = "integration")]
             clock: state.sweep_clock.clone(),
         })
+        .bind(crate::sweep_watchdog::SweepWatchdog {
+            organization_enabled: state.organization_delivery.is_some()
+                || state.email_deliveries.is_some(),
+            #[cfg(feature = "integration")]
+            clock: state.sweep_clock.clone(),
+        })
         .bind(RepositoryDelivery {
             state: state.clone(),
             #[cfg(feature = "integration")]
@@ -84,6 +90,12 @@ pub fn bind_with_faults(
 ) -> Builder {
     builder
         .bind(crate::sweep_schedule::SweepSchedule {
+            organization_enabled: state.organization_delivery.is_some()
+                || state.email_deliveries.is_some(),
+            #[cfg(feature = "integration")]
+            clock: state.sweep_clock.clone(),
+        })
+        .bind(crate::sweep_watchdog::SweepWatchdog {
             organization_enabled: state.organization_delivery.is_some()
                 || state.email_deliveries.is_some(),
             #[cfg(feature = "integration")]
@@ -314,6 +326,7 @@ impl RepositoryDelivery {
                 },
                 target_id: command.repo_id,
                 deliveries: vec![command.delivery_key()],
+                token: None,
             }))
             .send()
             .await?;

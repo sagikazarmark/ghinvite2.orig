@@ -734,6 +734,15 @@ pub struct InstallationRequester {
     pub id: u64,
 }
 
+/// How one `Link` walk treats SSO omissions, the invitation-list alias and
+/// its page budget.
+#[derive(Clone, Copy)]
+struct WalkPolicy {
+    allow_partial: bool,
+    invitation_alias: bool,
+    max_pages: usize,
+}
+
 impl Rest<'_> {
     /// Collect every page or fail. No prefix escapes when a later page fails,
     /// is malformed, cycles, or reports SSO partial results.
@@ -750,6 +759,37 @@ impl Rest<'_> {
         })
         .await?;
         Ok(all)
+    }
+
+    /// [`Rest::list_all`] within a caller's page budget. A listing with more
+    /// than `max_pages` pages is incomplete and fails like any other partial
+    /// walk; no prefix escapes.
+    pub async fn list_all_within<T: DeserializeOwned>(
+        &self,
+        endpoint: Endpoint,
+        path: PathTemplate,
+        query: &[(&str, &str)],
+        max_pages: usize,
+    ) -> Result<Vec<T>, ApiError> {
+        let mut all = Vec::new();
+        self.walk_pages_policy(
+            endpoint.meta(),
+            path,
+            query,
+            WalkPolicy {
+                allow_partial: false,
+                invitation_alias: endpoint == Endpoint::ListRepoInvitations,
+                max_pages: max_pages.min(crate::pagination::MAX_PAGES),
+            },
+            |response| {
+                let page: Vec<T> = serde_json::from_slice(&response.body)
+                    .map_err(|_| ApiError::Decode { what: "shape" })?;
+                all.extend(page);
+                Ok(())
+            },
+        )
+        .await
+        .map(|_| all)
     }
 
     /// Stream pages. Earlier callbacks can run before a later failure, so
@@ -780,8 +820,11 @@ impl Rest<'_> {
             endpoint.meta(),
             path,
             query,
-            false,
-            endpoint == Endpoint::ListRepoInvitations,
+            WalkPolicy {
+                allow_partial: false,
+                invitation_alias: endpoint == Endpoint::ListRepoInvitations,
+                max_pages: crate::pagination::MAX_PAGES,
+            },
             absorb,
         )
         .await
@@ -796,9 +839,19 @@ impl Rest<'_> {
         query: &[(&str, &str)],
         absorb: impl FnMut(Response) -> Result<(), ApiError>,
     ) -> Result<(), ApiError> {
-        self.walk_pages_policy(meta, path, query, false, false, absorb)
-            .await
-            .map(|_| ())
+        self.walk_pages_policy(
+            meta,
+            path,
+            query,
+            WalkPolicy {
+                allow_partial: false,
+                invitation_alias: false,
+                max_pages: crate::pagination::MAX_PAGES,
+            },
+            absorb,
+        )
+        .await
+        .map(|_| ())
     }
 
     async fn walk_pages_policy(
@@ -806,10 +859,14 @@ impl Rest<'_> {
         meta: EndpointMeta,
         path: PathTemplate,
         query: &[(&str, &str)],
-        allow_partial: bool,
-        invitation_alias: bool,
+        policy: WalkPolicy,
         mut absorb: impl FnMut(Response) -> Result<(), ApiError>,
     ) -> Result<PageCompletion, ApiError> {
+        let WalkPolicy {
+            allow_partial,
+            invitation_alias,
+            max_pages,
+        } = policy;
         authorize_meta(&meta, self)?;
         if !meta.paginated || meta.method != Method::Get {
             return Err(ApiError::Decode {
@@ -840,7 +897,7 @@ impl Rest<'_> {
         crate::pagination::walk_link_pages_with(
             first_path,
             base,
-            crate::pagination::MAX_PAGES,
+            max_pages,
             |path| {
                 let expected_path = &expected_path;
                 let alias = &alias;
@@ -925,8 +982,11 @@ impl PartialRest<'_, '_> {
                 endpoint.meta(),
                 path,
                 query,
-                true,
-                endpoint == Endpoint::ListRepoInvitations,
+                WalkPolicy {
+                    allow_partial: true,
+                    invitation_alias: endpoint == Endpoint::ListRepoInvitations,
+                    max_pages: crate::pagination::MAX_PAGES,
+                },
                 |response| {
                     let page = serde_json::from_slice(&response.body)
                         .map_err(|_| ApiError::Decode { what: "shape" })?;
@@ -947,6 +1007,22 @@ pub async fn list_repo_invitations(
         Endpoint::ListRepoInvitations,
         repo.path(Endpoint::ListRepoInvitations),
         &[],
+    )
+    .await
+}
+
+/// [`list_repo_invitations`] that fails instead of reading more than
+/// `max_pages` pages: a bounded walk is complete or supplies nothing.
+pub async fn list_repo_invitations_within(
+    rest: &Rest<'_>,
+    repo: Repository<'_>,
+    max_pages: usize,
+) -> Result<Vec<RepoInvitation>, ApiError> {
+    rest.list_all_within(
+        Endpoint::ListRepoInvitations,
+        repo.path(Endpoint::ListRepoInvitations),
+        &[],
+        max_pages,
     )
     .await
 }

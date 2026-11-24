@@ -21,6 +21,7 @@ async fn expired(
         ghinvite_workflows::settlement_policy::Evidence::Listed {
             upstream_id: 99,
             expired: true,
+            created_at: None,
         },
     );
     let reply = runtime

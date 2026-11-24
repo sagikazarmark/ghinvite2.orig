@@ -1,5 +1,5 @@
 //! Complete organization list observations. Failed-list presence is retained as
-//! evidence, never silently classified as expiry without an established policy.
+//! evidence; it means expiry only under the #86 lifetime rule in [`expired`].
 use crate::org_delivery::OrganizationInvitationRole;
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
@@ -75,6 +75,35 @@ impl OrganizationObservation {
     }
 }
 
+impl OrganizationObservation {
+    /// GitHub moves an organization invitation that outlives its 7-day
+    /// lifetime to the failed list. This complete observation shows `upstream_id`
+    /// expired when it still lists the invitation, pending or failed, more than
+    /// 7 days after creation. A failure GitHub stamped before that lifetime ended
+    /// failed for another reason and stays unclassified; absence is never expiry.
+    pub fn expired(&self, upstream_id: u64) -> bool {
+        let lifetime = chrono::Duration::seconds(i64::from(
+            crate::delivery::GITHUB_INVITATION_LIFETIME_SECONDS,
+        ));
+        let past = |created_at| {
+            crate::delivery::past_github_lifetime(created_at, self.observation_started_at)
+        };
+        self.pending
+            .iter()
+            .any(|i| i.upstream_id == upstream_id && past(i.created_at))
+            || self.failed.iter().any(|f| {
+                f.invitation.upstream_id == upstream_id
+                    && past(f.invitation.created_at)
+                    && f.failed_at.is_none_or(|failed_at| {
+                        f.invitation
+                            .created_at
+                            .checked_add_signed(lifetime)
+                            .is_some_and(|expiry| failed_at >= expiry)
+                    })
+            })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,6 +142,37 @@ mod tests {
         let mut imprecise = good;
         imprecise.pending[0].upstream_id = crate::storage::integer::MAX_EXACT + 1;
         assert!(imprecise.validate().is_err());
+    }
+    #[test]
+    fn listing_past_the_seven_day_lifetime_is_expiry_and_absence_never_is() {
+        let mut value = observation();
+        let created = value.pending[0].created_at;
+        let lifetime = chrono::Duration::days(7);
+        value.observation_started_at = created + lifetime;
+        value.observed_at = value.observation_started_at;
+        assert!(!value.expired(99), "exactly seven days is still pending");
+        value.observation_started_at += chrono::Duration::seconds(1);
+        value.observed_at = value.observation_started_at;
+        assert!(value.expired(99), "still pending after its lifetime");
+        assert!(!value.expired(98), "another invitation is not this one");
+        let pending = value.pending.remove(0);
+        assert!(!value.expired(99), "absence is never expiry");
+        for (failed_at, expired) in [
+            (None, true),
+            (Some(created + lifetime), true),
+            (Some(created + lifetime - chrono::Duration::hours(1)), false),
+        ] {
+            value.failed = vec![FailedOrganizationInvitation {
+                invitation: pending.clone(),
+                failed_at,
+            }];
+            assert_eq!(value.expired(99), expired, "{failed_at:?}");
+        }
+        value.observation_started_at = created + lifetime;
+        assert!(
+            !value.expired(99),
+            "a failed entry inside its lifetime is not yet expiry"
+        );
     }
     #[test]
     fn failed_list_preserves_ambiguity_without_inventing_an_expiry_reason() {

@@ -98,21 +98,29 @@ impl OrganizationReconcile {
                                 },
                             ));
                         }
-                        let pending = api::list_invitations(&rest, &org.login)
-                            .await?
-                            .into_iter()
-                            .map(listed)
-                            .collect::<Result<Vec<_>, _>>()?;
-                        let failed = api::list_failed_invitations(&rest, &org.login)
-                            .await?
-                            .into_iter()
-                            .map(|v| {
-                                Ok::<_, ApiError>(FailedOrganizationInvitation {
-                                    invitation: listed(v.invitation)?,
-                                    failed_at: v.failed_at,
-                                })
+                        let pending = api::list_invitations_within(
+                            &rest,
+                            &org.login,
+                            crate::sweep_schedule::MAX_WALK_PAGES,
+                        )
+                        .await?
+                        .into_iter()
+                        .map(listed)
+                        .collect::<Result<Vec<_>, _>>()?;
+                        let failed = api::list_failed_invitations_within(
+                            &rest,
+                            &org.login,
+                            crate::sweep_schedule::MAX_WALK_PAGES,
+                        )
+                        .await?
+                        .into_iter()
+                        .map(|v| {
+                            Ok::<_, ApiError>(FailedOrganizationInvitation {
+                                invitation: listed(v.invitation)?,
+                                failed_at: v.failed_at,
                             })
-                            .collect::<Result<Vec<_>, _>>()?;
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
                         let observation = OrganizationObservation {
                             account_id: account.account_id,
                             installation_id: account.installation_id,
@@ -134,16 +142,24 @@ impl OrganizationReconcile {
                 // Failure or a partial list supplies no evidence. Leave registrations
                 // intact for the next sweep instead of spawning a second retry chain.
                 let observation = match result {
-                    Ok(value) => Some(value),
-                    Err(_) => {
+                    Ok(value) => Ok(value),
+                    Err(error) => {
                         tracing::warn!("organization sweep observation unavailable");
-                        None
+                        let error: crate::HandlerError = error.into();
+                        Err(crate::reconcile::walk_outcome(&error))
                     }
                 };
                 Ok::<_, HandlerError>(Json(observation))
             })
             .name("list_organization_invitations")
             .await?;
+        let observation = match observation {
+            Ok(observation) => Some(observation),
+            Err(outcome) => {
+                crate::reconcile::report(&ctx, &input, outcome).await?;
+                None
+            }
+        };
         if let Some(observation) = observation {
             ctx.service_client::<OrganizationReconcileClient>()
                 .observe_next(Json(ObservationBatch {

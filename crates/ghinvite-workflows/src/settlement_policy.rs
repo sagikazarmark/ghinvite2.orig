@@ -21,6 +21,10 @@ pub enum Evidence {
     Listed {
         upstream_id: u64,
         expired: bool,
+        /// GitHub's creation time from this same listing. Older evidence
+        /// without it can still settle on GitHub's own `expired` flag.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        created_at: Option<DateTime<Utc>>,
     },
     FoundByInvitee {
         upstream_id: u64,
@@ -80,6 +84,10 @@ impl Observation {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Provenance {
     ListedExpired,
+    /// Still listed by an observation taken after GitHub's 7-day lifetime.
+    ListedPastLifetime {
+        created_at: DateTime<Utc>,
+    },
     FailedInvitationExpired,
     EffectiveRole {
         role_name: EffectiveRole,
@@ -142,10 +150,29 @@ pub fn evaluate(
         Evidence::Listed {
             upstream_id: found,
             expired: true,
+            ..
         } if *found == upstream_id => Settle {
             state: InvitationState::Expired,
             provenance: Provenance::ListedExpired,
         },
+        // A fresh complete listing still shows the known invitation more than
+        // GitHub's 7-day lifetime after creation: it can no longer be accepted,
+        // whatever GitHub's own flag says. Absence is handled below and is
+        // never Expired.
+        Evidence::Listed {
+            upstream_id: found,
+            expired: false,
+            created_at: Some(created_at),
+        } if *found == upstream_id
+            && ghinvite_core::delivery::past_github_lifetime(*created_at, observation.at) =>
+        {
+            Settle {
+                state: InvitationState::Expired,
+                provenance: Provenance::ListedPastLifetime {
+                    created_at: *created_at,
+                },
+            }
+        }
         Evidence::FailedInvitation {
             upstream_id: found,
             reason: FailedReason::Expired,

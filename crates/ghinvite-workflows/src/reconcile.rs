@@ -1,6 +1,10 @@
 //! Authoritative scheduled sweep. Each invocation inspects at most one delivery;
 //! repository pagination is completed once and reused by its read-only fan-out.
-use crate::{AppState, settlement_observation::ListedInvitation, sweep_schedule::Tracked};
+use crate::{
+    AppState,
+    settlement_observation::ListedInvitation,
+    sweep_schedule::{Tracked, WalkOutcome},
+};
 use chrono::{DateTime, Utc};
 use ghinvite_core::{
     account::{AccountInstallationRef, App},
@@ -25,6 +29,10 @@ pub struct TargetInput {
     pub account: AccountInstallationRef,
     pub target_id: u64,
     pub deliveries: Vec<String>,
+    /// The scheduled run this walk belongs to; a requester refresh has none
+    /// and reports nothing to the schedule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<u64>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct Observations {
@@ -36,6 +44,39 @@ pub struct Observations {
 }
 pub struct Reconcile {
     pub state: AppState,
+}
+
+/// How a scheduled read that supplied no evidence counts for its run.
+pub(crate) fn walk_outcome(error: &crate::HandlerError) -> WalkOutcome {
+    match error.rate_limit() {
+        Some(limit) => WalkOutcome::Throttled {
+            retry_after_seconds: crate::throttle::backoff(limit.retry_after).as_secs(),
+        },
+        None => WalkOutcome::Failed,
+    }
+}
+
+/// Tell the run's schedule that this walk produced no evidence. One-way: the
+/// fan-out never waits on the schedule object.
+pub(crate) async fn report(
+    ctx: &Context<'_>,
+    target: &TargetInput,
+    outcome: WalkOutcome,
+) -> Result<(), TerminalError> {
+    let Some(token) = target.token else {
+        return Ok(());
+    };
+    ctx.object_client::<crate::sweep_schedule::SweepScheduleClient>(
+        target.account.key().map_err(TerminalError::new)?,
+    )
+    .report(Json(crate::sweep_schedule::WalkReport {
+        token,
+        target_id: target.target_id,
+        outcome,
+    }))
+    .send()
+    .await?;
+    Ok(())
 }
 
 impl Reconcile {
@@ -77,6 +118,7 @@ impl Reconcile {
                         account: input.account,
                         target_id,
                         deliveries: keys.into_iter().collect(),
+                        token: Some(input.token),
                     }))
                     .send()
                     .await?;
@@ -87,6 +129,7 @@ impl Reconcile {
                     account: input.account,
                     target_id,
                     deliveries: keys.into_iter().collect(),
+                    token: Some(input.token),
                 }))
                 .send()
                 .await?;
@@ -148,9 +191,10 @@ impl Reconcile {
                         account.installation_id,
                         &profiles::REPO_READ,
                         |handle| async move {
-                            crate::settlement_observation::list(
+                            crate::settlement_observation::list_within(
                                 &handle.rest(),
                                 &command.repo_full_name,
+                                crate::sweep_schedule::MAX_WALK_PAGES,
                             )
                             .await
                             .map_err(CallError::<std::convert::Infallible>::Api)
@@ -158,19 +202,26 @@ impl Reconcile {
                     )
                     .await
                 {
-                    Ok(list) => Ok::<_, restate_sdk::errors::HandlerError>(Json(Some(list))),
+                    Ok(list) => Ok::<_, restate_sdk::errors::HandlerError>(Json(Ok(list))),
                     Err(error) => {
                         let error: crate::HandlerError = error.into();
                         // A failed/partial read supplies no evidence. The next
                         // account sweep retries it; never accumulate an unbounded
                         // Restate retry chain alongside the hourly schedule.
                         tracing::warn!(error = %error, "scheduled observation unavailable");
-                        Ok(Json(None))
+                        Ok(Json(Err(walk_outcome(&error))))
                     }
                 }
             })
             .name("list_repository_invitations")
             .await?;
+        let invitations = match invitations {
+            Ok(invitations) => Some(invitations),
+            Err(outcome) => {
+                report(&ctx, &input, outcome).await?;
+                None
+            }
+        };
         if let Some(invitations) = invitations {
             ctx.service_client::<ReconcileClient>()
                 .observe_next(Json(Observations {
@@ -275,19 +326,26 @@ impl Reconcile {
                     )
                     .await
                 {
-                    Ok(evidence) => Ok::<_, restate_sdk::errors::HandlerError>(Json(evidence)),
+                    Ok(evidence) => Ok::<_, restate_sdk::errors::HandlerError>(Json(Ok(evidence))),
                     Err(error) => {
                         let error: crate::HandlerError = error.into();
                         // A failed/partial read supplies no evidence. The next
                         // account sweep retries it; never accumulate an unbounded
                         // Restate retry chain alongside the hourly schedule.
                         tracing::warn!(error = %error, "scheduled observation unavailable");
-                        Ok(Json(None))
+                        Ok(Json(Err(walk_outcome(&error))))
                     }
                 }
             })
             .name("verify_sweep_delivery")
             .await?;
+        let evidence = match evidence {
+            Ok(evidence) => evidence,
+            Err(outcome) => {
+                report(&ctx, &input.target, outcome).await?;
+                None
+            }
+        };
         if let Some(evidence) = evidence {
             ctx.object_client::<crate::delivery::RepositoryDeliveryClient>(key)
                 .reconcile(Json(evidence))

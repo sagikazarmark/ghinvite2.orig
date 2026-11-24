@@ -94,6 +94,22 @@ pub fn delivery_key(request_id: RequestId, repo_id: u64, delivery_generation: u6
     format!("{request_id}:{repo_id}:{delivery_generation}")
 }
 
+/// GitHub's fixed lifetime for a pending repository or organization invitation
+/// (GitHub documents 7 days; octoemu models it as `invitation-expiry`).
+pub const GITHUB_INVITATION_LIFETIME_SECONDS: u32 = 604_800;
+
+/// Whether a GitHub observation taken at `observed_at` still saw an invitation
+/// created at `created_at` more than GitHub's 7-day lifetime later. Only the
+/// presence that observation itself listed may be judged this way: a retained
+/// creation time alone never settles anything (#86).
+pub fn past_github_lifetime(created_at: DateTime<Utc>, observed_at: DateTime<Utc>) -> bool {
+    created_at
+        .checked_add_signed(chrono::Duration::seconds(i64::from(
+            GITHUB_INVITATION_LIFETIME_SECONDS,
+        )))
+        .is_some_and(|expiry| observed_at > expiry)
+}
+
 /// Advisory upstream timing, independent of immutable create/settlement receipts.
 /// It never authorizes a lifecycle transition or an external effect.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -144,7 +160,7 @@ impl InvitationTiming {
         let seconds = if owned {
             self.owned_lifetime_seconds?
         } else {
-            604800
+            GITHUB_INVITATION_LIFETIME_SECONDS
         };
         if !(3600..=604800).contains(&seconds) {
             return None;

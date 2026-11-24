@@ -53,6 +53,7 @@ pub mod settlement_observation;
 pub mod settlement_policy;
 pub mod state;
 pub mod sweep_schedule;
+pub mod sweep_watchdog;
 pub mod throttle;
 
 #[cfg(test)]

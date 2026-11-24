@@ -499,6 +499,7 @@ impl OrganizationDelivery {
                 },
                 target_id: command.organization.org_id,
                 deliveries: vec![command.delivery_key()],
+                token: None,
             }))
             .send()
             .await?;
@@ -538,6 +539,7 @@ impl OrganizationDelivery {
                     },
                     target_id: command.organization.org_id,
                     deliveries: vec![command.delivery_key()],
+                    token: None,
                 }))
                 .send()
                 .await?;

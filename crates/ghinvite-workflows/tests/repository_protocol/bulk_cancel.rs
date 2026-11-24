@@ -679,6 +679,7 @@ async fn old_batch_cancel_replay_cannot_retarget_explicit_reissue_and_new_operat
         ghinvite_workflows::settlement_policy::Evidence::Listed {
             upstream_id: 99,
             expired: true,
+            created_at: None,
         },
     );
     rpc(

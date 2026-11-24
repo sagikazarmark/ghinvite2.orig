@@ -240,7 +240,11 @@ pub(super) async fn listed(
             .confirmed_at
             .is_some_and(|at| input.observation_started_at >= at)
     {
-        let state = if input.pending.iter().any(|i| i.upstream_id == upstream_id)
+        let state = if input.expired(upstream_id) {
+            // Still listed past GitHub's 7-day lifetime in this complete,
+            // fresh observation (#86). Absence below is never expiry.
+            Some(InvitationState::Expired)
+        } else if input.pending.iter().any(|i| i.upstream_id == upstream_id)
             || input
                 .failed
                 .iter()
