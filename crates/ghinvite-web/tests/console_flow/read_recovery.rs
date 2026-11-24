@@ -285,7 +285,7 @@ async fn overview_keeps_unavailable_sections_distinct_from_empty_work() {
         )
         .await
         .unwrap();
-        sqlx::query(&format!("DROP TABLE {table}"))
+        sqlx::query(sqlx::AssertSqlSafe(format!("DROP TABLE {table}")))
             .execute(&pool)
             .await
             .unwrap();

@@ -12,7 +12,7 @@ impl ProjectionStorage for SqlxStorage {
         let input = reissue_sql::encode(envelope)?;
         let mut tx = self.pool.begin().await.map_err(crate::to_db_err)?;
         for statement in reissue_sql::statements() {
-            sqlx::query(&statement)
+            crate::shared_query(statement)
                 .bind(&input)
                 .execute(&mut *tx)
                 .await
@@ -29,7 +29,7 @@ impl ProjectionStorage for SqlxStorage {
         let input = revocation_sql::encode(envelope)?;
         let mut tx = self.pool.begin().await.map_err(crate::to_db_err)?;
         for statement in revocation_sql::STATEMENTS {
-            sqlx::query(statement)
+            sqlx::query(*statement)
                 .bind(&input)
                 .execute(&mut *tx)
                 .await
@@ -46,7 +46,7 @@ impl ProjectionStorage for SqlxStorage {
         let input = request_sql::encode(envelope)?;
         let mut tx = self.pool.begin().await.map_err(crate::to_db_err)?;
         for statement in request_sql::statements(envelope) {
-            sqlx::query(&statement)
+            crate::shared_query(statement)
                 .bind(&input)
                 .execute(&mut *tx)
                 .await
@@ -58,7 +58,7 @@ impl ProjectionStorage for SqlxStorage {
         let input = sql::encode(envelope)?;
         let mut tx = self.pool.begin().await.map_err(crate::to_db_err)?;
         for statement in sql::STATEMENTS {
-            sqlx::query(statement)
+            sqlx::query(*statement)
                 .bind(&input)
                 .execute(&mut *tx)
                 .await

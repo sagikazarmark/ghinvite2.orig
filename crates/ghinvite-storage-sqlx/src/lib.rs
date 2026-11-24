@@ -23,6 +23,17 @@ pub(crate) fn to_db_err(e: sqlx::Error) -> Error {
     Error::Database(e.to_string())
 }
 
+/// A statement built at runtime by one of ghinvite-core's shared SQL builders
+/// (the text the D1 storage prepares too). Those builders only join their own
+/// constant fragments, picked by enum and flag arguments, and every value is a
+/// bound parameter; this is the one place that audit is asserted to sqlx's
+/// `SqlSafeStr` check. Literal statements go straight to `sqlx::query`.
+pub(crate) fn shared_query(
+    sql: String,
+) -> sqlx::query::Query<'static, sqlx::Sqlite, sqlx::sqlite::SqliteArguments> {
+    sqlx::query(sqlx::AssertSqlSafe(sql))
+}
+
 /// Use the same exact integer range as D1, including native development.
 #[inline]
 pub(crate) fn u64_to_i64(v: u64) -> Result<i64> {

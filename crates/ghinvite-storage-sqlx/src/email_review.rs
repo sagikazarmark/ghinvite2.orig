@@ -60,7 +60,7 @@ impl EmailReviewStorage for SqlxStorage {
 impl SqlxStorage {
     async fn email_review_transition(
         &self,
-        statement: &str,
+        statement: &'static str,
         b: &EmailVaultBinding,
         now: i64,
     ) -> Result<bool> {

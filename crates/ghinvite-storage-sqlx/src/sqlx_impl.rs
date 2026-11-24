@@ -22,7 +22,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-type Query<'q> = sqlx::query::Query<'q, Sqlite, SqliteArguments<'q>>;
+type Query<'q> = sqlx::query::Query<'q, Sqlite, SqliteArguments>;
 
 #[derive(Clone)]
 pub struct SqlxStorage {
@@ -195,15 +195,15 @@ impl SqlxStorage {
     }
 
     /// Run `statements` in one transaction, each bound to the same `input`.
-    pub(crate) async fn transaction<S: AsRef<str>>(
+    pub(crate) async fn transaction(
         &self,
-        statements: &[S],
+        statements: Vec<String>,
         input: &str,
         classify: fn(String) -> Error,
     ) -> Result<()> {
         let mut tx = self.pool.begin().await.map_err(to_db_err)?;
         for statement in statements {
-            sqlx::query(statement.as_ref())
+            crate::shared_query(statement)
                 .bind(input)
                 .execute(&mut *tx)
                 .await
@@ -285,7 +285,7 @@ impl ConsoleStorage for SqlxStorage {
         let sql = cs::links_query();
         invitation_links::fold(
             self.all(
-                sqlx::query(&sql)
+                crate::shared_query(sql)
                     .bind(u64_to_i64(scope.account_id())?)
                     .bind(repos),
             )
@@ -305,7 +305,7 @@ impl ConsoleStorage for SqlxStorage {
         let sql = cs::count_query();
         let row: pending_queue::CountRow = self
             .one(
-                sqlx::query(&sql)
+                crate::shared_query(sql)
                     .bind(u64_to_i64(scope.account_id())?)
                     .bind(repos),
             )
@@ -324,7 +324,7 @@ impl ConsoleStorage for SqlxStorage {
         let sql = cs::pending_query(after.is_some());
         pending_queue::PendingPage::from_json(
             self.all(
-                sqlx::query(&sql)
+                crate::shared_query(sql)
                     .bind(u64_to_i64(scope.account_id())?)
                     .bind(after.map(|b| b.seek_key()))
                     .bind(repos),
@@ -345,14 +345,14 @@ impl ConsoleStorage for SqlxStorage {
                 .await;
         };
         fn query<'a>(
-            sql: &'a str,
+            sql: String,
             account: u64,
             repos: &'a str,
             event: Option<EventType>,
             position: AuditPosition,
         ) -> Result<Query<'a>> {
             let boundary = position.boundary();
-            Ok(sqlx::query(sql)
+            Ok(crate::shared_query(sql)
                 .bind(u64_to_i64(account)?)
                 .bind(event.map(|e| e.as_str()))
                 .bind(boundary.map(audit_read::boundary_time))
@@ -361,7 +361,7 @@ impl ConsoleStorage for SqlxStorage {
         }
         let sql = cs::audit_query(event, position, false);
         let mut page = AuditPage::from_rows(
-            self.all(query(&sql, scope.account_id(), &repos, event, position)?)
+            self.all(query(sql, scope.account_id(), &repos, event, position)?)
                 .await?,
             position,
         )?;
@@ -369,7 +369,7 @@ impl ConsoleStorage for SqlxStorage {
             for (seek, flag) in [(newer, &mut page.has_newer), (older, &mut page.has_older)] {
                 let sql = cs::audit_query(event, seek, true);
                 *flag = self
-                    .optional::<IgnoredAny>(query(&sql, scope.account_id(), &repos, event, seek)?)
+                    .optional::<IgnoredAny>(query(sql, scope.account_id(), &repos, event, seek)?)
                     .await?
                     .is_some();
             }
@@ -422,7 +422,7 @@ impl ConsoleStorage for SqlxStorage {
         before: Option<request_history::Boundary>,
     ) -> Result<request_history::Page> {
         let sql = request_history::query(before);
-        let query = sqlx::query(&sql)
+        let query = crate::shared_query(sql)
             .bind(u64_to_i64(account_id)?)
             .bind(link_id.to_string())
             .bind(before.map(request_history::boundary_key));
@@ -441,7 +441,7 @@ impl ConsoleStorage for SqlxStorage {
         after: Option<pending_queue::PendingBoundary>,
     ) -> Result<pending_queue::PendingPage> {
         let sql = pending_queue::query(after.is_some());
-        let query = sqlx::query(&sql)
+        let query = crate::shared_query(sql)
             .bind(u64_to_i64(account_id)?)
             .bind(after.map(|b| b.seek_key()));
         pending_queue::PendingPage::from_json(self.all(query).await?)
@@ -469,25 +469,25 @@ impl ConsoleStorage for SqlxStorage {
         position: AuditPosition,
     ) -> Result<AuditPage> {
         fn query(
-            sql: &str,
+            sql: String,
             account_id: u64,
             event: Option<EventType>,
             position: AuditPosition,
-        ) -> Result<Query<'_>> {
+        ) -> Result<Query<'static>> {
             let boundary = position.boundary();
-            Ok(sqlx::query(sql)
+            Ok(crate::shared_query(sql)
                 .bind(u64_to_i64(account_id)?)
                 .bind(event.map(|e| e.as_str()))
                 .bind(boundary.map(audit_read::boundary_time))
                 .bind(boundary.map(|b| b.id.to_string())))
         }
         let sql = audit_read::query(event, position, false);
-        let rows = self.all(query(&sql, account_id, event, position)?).await?;
+        let rows = self.all(query(sql, account_id, event, position)?).await?;
         let mut page = AuditPage::from_rows(rows, position)?;
         if let Some([newer, older]) = page.probes() {
             for (seek, flag) in [(newer, &mut page.has_newer), (older, &mut page.has_older)] {
                 let sql = audit_read::query(event, seek, true);
-                let probe = query(&sql, account_id, event, seek)?;
+                let probe = query(sql, account_id, event, seek)?;
                 *flag = self.optional::<IgnoredAny>(probe).await?.is_some();
             }
         }
@@ -725,7 +725,7 @@ impl DeliveryStorage for SqlxStorage {
     ) -> Result<()> {
         let encoded = delivery_projection::encode_with_events(projection)?;
         self.transaction(
-            &delivery_projection::statements(),
+            delivery_projection::statements(),
             &encoded,
             delivery_projection::classify,
         )
@@ -739,7 +739,7 @@ impl DeliveryStorage for SqlxStorage {
         use ghinvite_core::storage::operational;
         let encoded = operational::encode(telemetry)?;
         self.transaction(
-            &operational::statements(),
+            operational::statements(),
             &encoded,
             delivery_projection::classify,
         )
@@ -752,7 +752,7 @@ impl AuditStorage for SqlxStorage {
     async fn audit(&self, event: &AuditEvent) -> Result<()> {
         ghinvite_core::storage::integer::validate(event)?;
         let sql = audit_write::insert(event.event_type);
-        let query = sqlx::query(&sql)
+        let query = crate::shared_query(sql)
             .bind(event.id.to_string())
             .bind(u64_to_i64(event.account_id)?)
             .bind(event.occurred_at)
@@ -863,7 +863,7 @@ impl ghinvite_core::storage::AppInstallationStorage for SqlxStorage {
         let input = sql::encode(owner, change)?;
         let mut tx = self.pool.begin().await.map_err(to_db_err)?;
         for statement in sql::statements() {
-            sqlx::query(&statement)
+            crate::shared_query(statement)
                 .bind(&input)
                 .execute(&mut *tx)
                 .await
@@ -1580,17 +1580,18 @@ mod tests {
                     AuditPosition::Before(b),
                     AuditPosition::After(b),
                 ] {
-                    let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(&format!(
-                        "EXPLAIN QUERY PLAN {}",
-                        audit_read::query(filter, position, false)
-                    ))
-                    .bind(100)
-                    .bind(filter.map(|e| e.as_str()))
-                    .bind(position.boundary().map(audit_read::boundary_time))
-                    .bind(position.boundary().map(|b| b.id.to_string()))
-                    .fetch_all(&s.pool)
-                    .await
-                    .unwrap();
+                    let plan: Vec<(i64, i64, i64, String)> =
+                        sqlx::query_as(sqlx::AssertSqlSafe(format!(
+                            "EXPLAIN QUERY PLAN {}",
+                            audit_read::query(filter, position, false)
+                        )))
+                        .bind(100)
+                        .bind(filter.map(|e| e.as_str()))
+                        .bind(position.boundary().map(audit_read::boundary_time))
+                        .bind(position.boundary().map(|b| b.id.to_string()))
+                        .fetch_all(&s.pool)
+                        .await
+                        .unwrap();
                     let plan = format!("{plan:?}");
                     assert!(
                         plan.contains(if filter.is_some() {
@@ -1620,10 +1621,10 @@ mod tests {
                 id: RequestId::new(),
             }),
         ] {
-            let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(&format!(
+            let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
                 "EXPLAIN QUERY PLAN {}",
                 request_history::query(before)
-            ))
+            )))
             .bind(42)
             .bind(InvitationLinkId::new().to_string())
             .bind(before.map(request_history::boundary_key))
@@ -1730,11 +1731,13 @@ mod tests {
             s.audit(&sample_audit(100, EventType::RequestCreated, "missing"))
                 .await
                 .unwrap();
-            sqlx::query(&format!("UPDATE audit_events SET {column} = ?"))
-                .bind(value)
-                .execute(&s.pool)
-                .await
-                .unwrap();
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "UPDATE audit_events SET {column} = ?"
+            )))
+            .bind(value)
+            .execute(&s.pool)
+            .await
+            .unwrap();
             assert!(
                 s.list_audit_events(100, None, AuditPosition::Latest)
                     .await

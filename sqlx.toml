@@ -1,2 +1,5 @@
-[migrations]
-version-format = "sequential"
+# sqlx-cli 0.9 configuration (the `sqlx-toml` format); the runtime and the
+# `migrate!` macro don't read it (ghinvite doesn't enable the feature).
+[migrate.defaults]
+# `sqlx migrate add` numbers new files NNNN_ like the existing ones.
+migration-versioning = "sequential"

@@ -249,10 +249,10 @@ async fn queue_index_seeks_exact_times_and_missing_context_or_failed_reads_stay_
         1
     );
     for after in [false, true] {
-        let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(&format!(
+        let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "EXPLAIN QUERY PLAN {}",
             pending_queue::query(after)
-        ))
+        )))
         .bind(42)
         .bind(after.then(|| boundary.seek_key()))
         .fetch_all(&db)
@@ -270,17 +270,24 @@ async fn queue_index_seeks_exact_times_and_missing_context_or_failed_reads_stay_
         if after {
             assert!(detail.contains("<expr>>?"), "{detail}");
         }
-        // The only sort is the bounded final page, not the candidate request set.
-        assert_eq!(
-            detail.matches("USE TEMP B-TREE FOR ORDER BY").count(),
-            1,
+        // The candidate request set is never sorted: the `page` CTE (its plan
+        // runs up to `MATERIALIZE links`) reads the seek index in order. Only
+        // the bounded final page may be: SQLite 3.46 sorts it, 3.54 streams
+        // the already ordered materialized page.
+        let page_plan = detail.split("MATERIALIZE links").next().unwrap();
+        assert!(
+            !page_plan.contains("USE TEMP B-TREE FOR ORDER BY"),
+            "{detail}"
+        );
+        assert!(
+            detail.matches("USE TEMP B-TREE FOR ORDER BY").count() <= 1,
             "{detail}"
         );
     }
-    let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(&format!(
+    let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "EXPLAIN QUERY PLAN {}",
         pending_queue::COUNT_QUERY
-    ))
+    )))
     .bind(42)
     .fetch_all(&db)
     .await

@@ -17,7 +17,7 @@ impl OrgDeliveryStorage for SqlxStorage {
         use ghinvite_core::storage::organization_telemetry as telemetry_sql;
         let input = telemetry_sql::encode(telemetry)?;
         self.transaction(
-            &telemetry_sql::statements(),
+            telemetry_sql::statements(),
             &input,
             ghinvite_core::storage::delivery_projection::classify,
         )
@@ -101,7 +101,7 @@ impl OrgDeliveryStorage for SqlxStorage {
         let input = sql::encode_projection_with_events(projection, row.as_ref())?;
         let mut tx = self.pool.begin().await.map_err(to_db_err)?;
         for statement in sql::statements() {
-            sqlx::query(&statement)
+            crate::shared_query(statement)
                 .bind(&input)
                 .execute(&mut *tx)
                 .await
@@ -229,7 +229,7 @@ mod tests {
         let mut tx = storage.pool.begin().await.unwrap();
         let mut conflict = None;
         for statement in sql::statements() {
-            if let Err(error) = sqlx::query(&statement)
+            if let Err(error) = crate::shared_query(statement)
                 .bind(&delayed)
                 .execute(&mut *tx)
                 .await
@@ -282,7 +282,7 @@ mod tests {
         let mut tx = storage.pool.begin().await.unwrap();
         let mut rejected = false;
         for statement in sql::statements() {
-            if let Err(error) = sqlx::query(&statement)
+            if let Err(error) = crate::shared_query(statement)
                 .bind(&encoded)
                 .execute(&mut *tx)
                 .await

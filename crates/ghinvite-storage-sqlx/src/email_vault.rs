@@ -64,7 +64,7 @@ impl EmailVaultStorage for SqlxStorage {
 impl SqlxStorage {
     async fn email_vault_transition(
         &self,
-        statement: &str,
+        statement: &'static str,
         b: &EmailVaultBinding,
         now: i64,
     ) -> Result<bool> {
@@ -99,7 +99,8 @@ impl SqlxStorage {
             let statement = format!(
                 "CREATE TEMP TRIGGER fail_email_activation BEFORE UPDATE OF activated_at ON email_vault WHEN OLD.row_number={row} BEGIN SELECT RAISE(ABORT,'fixture activation unavailable'); END"
             );
-            sqlx::query(&statement)
+            // DDL takes no bound parameters; the only spliced value is a `u16`.
+            sqlx::query(sqlx::AssertSqlSafe(statement))
                 .execute(&self.pool)
                 .await
                 .map_err(|_| sql::unavailable())?;

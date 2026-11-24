@@ -8,7 +8,10 @@ async fn obsolete_member_table_removed_without_rewriting_org_receipts() {
         .unwrap();
     let migrations = sqlx::migrate!("../../migrations");
     for migration in migrations.iter().filter(|m| m.version < 22) {
-        sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+        sqlx::raw_sql(migration.sql.clone())
+            .execute(&pool)
+            .await
+            .unwrap();
     }
     sqlx::query("INSERT INTO webhook_receipts(payload_sha256,app,event,action) VALUES(?,'repo','member','added')")
         .bind("b".repeat(64)).execute(&pool).await.unwrap();

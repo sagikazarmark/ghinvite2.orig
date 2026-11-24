@@ -19,7 +19,10 @@ async fn fixture() -> SqlitePool {
         .iter()
         .filter(|m| m.version <= 22)
     {
-        sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+        sqlx::raw_sql(migration.sql.clone())
+            .execute(&pool)
+            .await
+            .unwrap();
     }
     sqlx::raw_sql(SEED).execute(&pool).await.unwrap();
     pool
@@ -32,7 +35,7 @@ async fn snapshot(pool: &SqlitePool) -> BTreeMap<String, Vec<String>> {
     let mut result = BTreeMap::new();
     for table in tables {
         assert!(table.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
-        let columns = sqlx::query(&format!("PRAGMA table_info({table})"))
+        let columns = sqlx::query(sqlx::AssertSqlSafe(format!("PRAGMA table_info({table})")))
             .fetch_all(pool)
             .await
             .unwrap()
@@ -40,10 +43,10 @@ async fn snapshot(pool: &SqlitePool) -> BTreeMap<String, Vec<String>> {
             .map(|row| row.get::<String, _>("name"))
             .filter(|name| table != "deliveries" || name != "invitation_id")
             .collect::<Vec<_>>();
-        let rows = sqlx::query_scalar(&format!(
+        let rows = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
             "SELECT json_array({}) AS raw FROM {table} ORDER BY raw",
             columns.join(","),
-        ))
+        )))
         .fetch_all(pool)
         .await
         .unwrap();

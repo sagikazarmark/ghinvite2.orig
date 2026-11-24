@@ -74,7 +74,7 @@ impl EmailDeliveryStorage for SqlxStorage {
         let previous: Option<sql::SnapshotRow> = row.as_ref().map(decode).transpose()?;
         if let Some(encoded) = sql::encode_projection_with_events(projection, previous.as_ref())? {
             for statement in sql::statements() {
-                sqlx::query(&statement)
+                crate::shared_query(statement)
                     .bind(&encoded)
                     .execute(&mut *tx)
                     .await
@@ -261,7 +261,7 @@ mod telemetry_tests {
         snapshot.unknown_since = Some(at + chrono::Duration::seconds(1));
         s.project_email_delivery(&snapshot).await.unwrap();
         let mut tx = s.pool.begin().await.unwrap();
-        let failure = sqlx::query(&sql::statements()[0])
+        let failure = crate::shared_query(sql::statements().remove(0))
             .bind(&stale)
             .execute(&mut *tx)
             .await

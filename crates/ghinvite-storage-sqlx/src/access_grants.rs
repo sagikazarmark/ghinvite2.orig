@@ -80,7 +80,7 @@ impl AccessGrantStorage for SqlxStorage {
             .map(decode::<sql::SourceRow>)
             .transpose()?;
         let input = sql::encode_projection(snapshot, row.as_ref(), source.as_ref())?;
-        self.transaction(&sql::statements(), &input, sql::classify)
+        self.transaction(sql::statements(), &input, sql::classify)
             .await
     }
     async fn get_access_grant(&self, id: &str) -> Result<Option<AccessGrantSnapshot>> {

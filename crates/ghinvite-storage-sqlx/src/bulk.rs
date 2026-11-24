@@ -21,7 +21,7 @@ impl BulkStorage for SqlxStorage {
         let previous: Option<sql::Row> = row.as_ref().map(decode).transpose()?;
         if let Some(input) = sql::encode_projection(projection, previous.as_ref())? {
             for statement in sql::statements() {
-                sqlx::query(&statement)
+                crate::shared_query(statement)
                     .bind(&input)
                     .execute(&mut *tx)
                     .await

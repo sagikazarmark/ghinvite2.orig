@@ -23,9 +23,9 @@ async fn raw_lapsed_writes_preserve_approval_and_terminal_state() {
         "projection_revision=projection_revision-1",
         "projection_content=json_set(projection_content,'$.decision.decision_id','changed')",
     ] {
-        let error = sqlx::query(&format!(
+        let error = sqlx::query(sqlx::AssertSqlSafe(format!(
             "UPDATE invitation_requests SET {update} WHERE id=?"
-        ))
+        )))
         .bind(&lapsed.0)
         .execute(&pool)
         .await

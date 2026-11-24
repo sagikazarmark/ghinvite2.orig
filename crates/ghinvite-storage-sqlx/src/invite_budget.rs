@@ -30,7 +30,7 @@ impl InviteBudgetStorage for SqlxStorage {
         let input = invite_budget::encode(snapshot)?;
         let mut tx = self.pool.begin().await.map_err(to_db_err)?;
         for statement in invite_budget::APPLY {
-            sqlx::query(statement)
+            sqlx::query(*statement)
                 .bind(&input)
                 .execute(&mut *tx)
                 .await

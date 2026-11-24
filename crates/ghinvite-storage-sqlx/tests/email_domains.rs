@@ -121,7 +121,7 @@ async fn raw_domain_guards_preserve_rules_and_evidence() {
         .replace("INSERT INTO", "INSERT OR REPLACE INTO")
         .replace("'domain-raw-control'", "?");
     assert!(
-        sqlx::query(&replace_link)
+        sqlx::query(sqlx::AssertSqlSafe(replace_link))
             .bind(restricted)
             .bind("[{\"exact\":\"changed.example\"}]")
             .bind(restricted)
@@ -135,7 +135,7 @@ async fn raw_domain_guards_preserve_rules_and_evidence() {
     let mut changed_proof: serde_json::Value = serde_json::from_str(proof).unwrap();
     changed_proof["matched_domains"] = serde_json::json!(["example.com"]);
     assert!(
-        sqlx::query(&replace_request)
+        sqlx::query(sqlx::AssertSqlSafe(replace_request))
             .bind(evidenced)
             .bind(changed_proof.to_string())
             .bind(evidenced)

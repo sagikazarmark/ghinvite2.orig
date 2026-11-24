@@ -23,9 +23,9 @@ async fn raw_reissue_requires_exact_immutable_revision_proof() {
         "decided_by=701",
     ] {
         assert!(
-            sqlx::query(&format!(
+            sqlx::query(sqlx::AssertSqlSafe(format!(
                 "UPDATE invitation_requests SET {update} WHERE id=?"
-            ))
+            )))
             .bind(&id)
             .execute(&pool)
             .await
