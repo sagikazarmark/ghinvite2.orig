@@ -94,7 +94,8 @@ pub struct WalkReport {
 pub enum WalkOutcome {
     /// A read failed or was incomplete (including the page cap).
     Failed,
-    /// GitHub throttled the read; `retry_after_seconds` is its bounded guidance.
+    /// GitHub throttled the read; `retry_after_seconds` is its guidance,
+    /// unclamped (0 when GitHub named no wait).
     Throttled { retry_after_seconds: u64 },
 }
 

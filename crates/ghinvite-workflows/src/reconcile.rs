@@ -47,10 +47,14 @@ pub struct Reconcile {
 }
 
 /// How a scheduled read that supplied no evidence counts for its run.
+/// GitHub's guidance passes through unclamped: the schedule defers the whole
+/// chain, never earlier than GitHub asked and at most by the idle cadence
+/// (`sweep_schedule::deferral_seconds`). Unlike a delivery recheck, no lock is
+/// held across the wait, so the one-hour `throttle::MAXIMUM` does not apply.
 pub(crate) fn walk_outcome(error: &crate::HandlerError) -> WalkOutcome {
     match error.rate_limit() {
         Some(limit) => WalkOutcome::Throttled {
-            retry_after_seconds: crate::throttle::backoff(limit.retry_after).as_secs(),
+            retry_after_seconds: limit.retry_after.map_or(0, |wait| wait.as_secs()),
         },
         None => WalkOutcome::Failed,
     }
@@ -353,5 +357,57 @@ impl Reconcile {
                 .await?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ghinvite_github::{ApiError, error::RateLimitScope};
+    fn throttled(retry_after: Option<std::time::Duration>) -> crate::HandlerError {
+        ApiError::RateLimited {
+            scope: RateLimitScope::Primary,
+            retry_after,
+            resource: None,
+        }
+        .into()
+    }
+    #[test]
+    fn sweep_throttling_keeps_githubs_guidance_beyond_an_hour() {
+        let six_hours = 6 * 60 * 60;
+        let outcome = walk_outcome(&throttled(Some(std::time::Duration::from_secs(six_hours))));
+        assert_eq!(
+            outcome,
+            WalkOutcome::Throttled {
+                retry_after_seconds: six_hours
+            }
+        );
+        let WalkOutcome::Throttled {
+            retry_after_seconds,
+        } = outcome
+        else {
+            unreachable!()
+        };
+        // The chain then waits at least the guidance, bounded only by the
+        // idle cadence.
+        assert_eq!(
+            crate::sweep_schedule::deferral_seconds(1, retry_after_seconds),
+            six_hours
+        );
+        assert_eq!(
+            crate::sweep_schedule::deferral_seconds(1, 3 * 24 * 60 * 60),
+            crate::sweep_schedule::IDLE_SECONDS
+        );
+        assert_eq!(
+            walk_outcome(&throttled(None)),
+            WalkOutcome::Throttled {
+                retry_after_seconds: 0
+            },
+            "unguided throttling uses the backoff alone"
+        );
+        assert_eq!(
+            walk_outcome(&ApiError::Server { status: 502 }.into()),
+            WalkOutcome::Failed
+        );
     }
 }
