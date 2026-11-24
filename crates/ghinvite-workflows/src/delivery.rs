@@ -580,7 +580,7 @@ impl RepositoryDelivery {
                                 && (faults.lose_http_result.swap(false, Ordering::SeqCst)
                                     || faults
                                         .lose_http_results
-                                        .fetch_update(
+                                        .try_update(
                                             Ordering::SeqCst,
                                             Ordering::SeqCst,
                                             |remaining| remaining.checked_sub(1),

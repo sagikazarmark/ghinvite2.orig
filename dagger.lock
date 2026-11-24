@@ -3,5 +3,5 @@
 # Run `dagger workspace update` to refresh the pinned versions.
 [["version","2"]]
 ["","oci-sha",["docker.io/library/node:20.20.2-bookworm"],"sha256:8f693eaa7e0a8e71560c9a82b55fd54c2ae920a2ba5d2cde28bac7d1c01c9ba5"]
-["","oci-sha",["docker.io/library/rust:1.92.0-bookworm"],"sha256:e90e846de4124376164ddfbaab4b0774c7bdeef5e738866295e5a90a34a307a2"]
-["","oci-sha",["docker.io/library/rust:1.92.0-trixie"],"sha256:f58923369ba295ae1f60bc49d03f2c955a5c93a0b7d49acfb2b2a65bebaf350d"]
+["","oci-sha",["docker.io/library/rust:1.100.0-bookworm"],"sha256:1b9dc70890ec494e466c87f5ad41ad544bfb30ea6acc99a3e068c47a4ae3f23e"]
+["","oci-sha",["docker.io/library/rust:1.100.0-trixie"],"sha256:1f65e0abcce9b449f9533df5994f2a62391059196c481a09b8e1b522dd6d75af"]

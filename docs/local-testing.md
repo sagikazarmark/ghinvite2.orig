@@ -199,10 +199,10 @@ bash scripts/test-restate.sh durable_projection
 
 Prerequisites:
 
-- Rust **1.92.0**, selected by `rust-toolchain.toml`, with Cargo dependencies
+- Rust **1.100.0**, selected by `rust-toolchain.toml`, with Cargo dependencies
   available (`--locked` uses the checked-in lockfile). The runner prints the
   actual compiler version: non-rustup environments such as Nix may override the
-  toolchain file; use 1.92.0 to reproduce the CI compiler exactly.
+  toolchain file; use 1.100.0 to reproduce the CI compiler exactly.
 - Bash, GNU coreutils `timeout` (on macOS, `brew install coreutils` provides
   `gtimeout`), and Docker Compose v2+.
 - A running **local** Docker Engine 20.10+ on Linux, or Docker Desktop on

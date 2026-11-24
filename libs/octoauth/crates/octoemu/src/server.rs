@@ -75,16 +75,16 @@ pub(crate) async fn route_context(
     } else if let Some(refusal) = api_version(&shared, &request) {
         refusal
     } else {
-        match auth::authenticate(&shared, request.headers(), Some(auth)).and_then(|caller| {
-            auth::admit(&shared, auth, &caller)?;
-            Ok(caller)
-        }) {
+        match auth::authenticate(&shared, request.headers(), Some(auth)) {
             Err(rejection) => rejection,
-            Ok(caller) => {
-                identity = caller.identity();
-                request.extensions_mut().insert(caller);
-                next.run(request).await
-            }
+            Ok(caller) => match auth::admit(&shared, auth, &caller) {
+                Err(rejection) => rejection,
+                Ok(()) => {
+                    identity = caller.identity();
+                    request.extensions_mut().insert(caller);
+                    next.run(request).await
+                }
+            },
         }
     };
     response.extensions_mut().insert(MatchedRoute(route));

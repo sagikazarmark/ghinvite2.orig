@@ -9,7 +9,7 @@ check.skip = ["**"]
 generate.skip = ["**"]
 
 [modules.rust.settings]
-version = "1.92.0-bookworm"
+version = "1.100.0-bookworm"
 targets = ["wasm32-unknown-unknown"]
 
 [modules.dioxus]
@@ -18,7 +18,7 @@ check.skip = ["*"]
 
 [modules.dioxus.settings]
 # The upstream dx binary requires glibc >= 2.39.
-rustVersion = "1.92.0-trixie"
+rustVersion = "1.100.0-trixie"
 version = "0.7.9"
 wasmBindgenVersion = "0.2.120"
 binaryenVersion = "version_129"
@@ -29,7 +29,7 @@ source = "github.com/sagikazarmark/daggerverse-beta/worker-build@b0671fd12a040fe
 check.skip = ["*"]
 
 [modules.worker-build.settings]
-rustVersion = "1.92.0-bookworm"
+rustVersion = "1.100.0-bookworm"
 version = "0.8.1"
 wasmBindgenVersion = "0.2.120"
 esbuildVersion = "0.28.0"

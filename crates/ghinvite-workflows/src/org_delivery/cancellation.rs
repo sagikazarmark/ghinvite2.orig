@@ -352,7 +352,7 @@ pub(super) async fn drive(
             if let Some(faults) = &owner.faults
                 && faults
                     .lose_cancel_results
-                    .fetch_update(
+                    .try_update(
                         std::sync::atomic::Ordering::SeqCst,
                         std::sync::atomic::Ordering::SeqCst,
                         |n| n.checked_sub(1),

@@ -103,7 +103,7 @@ fn remove(old: &Keyring, v: u32) -> Result<Keyring, String> {
 }
 
 fn print(ring: &Keyring) {
-    println!("{}", &*ring.to_descriptor());
+    println!("{}", *ring.to_descriptor());
 }
 
 fn run(args: &[String]) -> Result<(), String> {

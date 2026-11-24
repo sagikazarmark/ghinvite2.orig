@@ -39,7 +39,7 @@ pub(crate) fn lose_confirmed_result() -> bool {
     };
     if state
         .remaining
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
         .is_ok()
     {
         state.losses.fetch_add(1, Ordering::SeqCst);

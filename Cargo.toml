@@ -109,7 +109,11 @@ opt-level = "z"
 lto = true
 codegen-units = 1
 panic = "abort"
-strip = true
+# Not `true`: since LLVM 23 (Rust 1.100) wasm-ld's `--strip-all` also drops
+# custom sections, including wasm-bindgen's metadata, and dx strips before it
+# runs wasm-bindgen ("import ... doesn't have an adapter listed";
+# wasm-bindgen/wasm-bindgen#5268). wasm-opt still strips the shipped names.
+strip = "debuginfo"
 
 # Wasm clocks and input draining: merged upstream as restatedev/sdk-rust#141
 # (2026-11-10) but not yet in a release. Pinned to that commit, which is 0.13.0

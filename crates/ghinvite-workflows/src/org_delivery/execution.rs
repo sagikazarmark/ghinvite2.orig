@@ -370,7 +370,7 @@ impl OrganizationDelivery {
                 if let Some(faults) = &self.faults
                     && faults
                         .lose_results
-                        .fetch_update(
+                        .try_update(
                             std::sync::atomic::Ordering::SeqCst,
                             std::sync::atomic::Ordering::SeqCst,
                             |n| n.checked_sub(1),

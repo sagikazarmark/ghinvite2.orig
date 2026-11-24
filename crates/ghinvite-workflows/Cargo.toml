@@ -14,20 +14,18 @@ publish.workspace = true
 runtime-tests = []
 # Native-only: runs the handlers against the local `restate-server`
 # (compose.yaml) via `scripts/test-restate.sh`. Never enabled for the Workers
-# build, which is why `axum` and `ghinvite-web` can be plain optional deps.
-integration = ["dep:ghinvite-web", "dep:axum"]
+# build. The suites' `axum` and `ghinvite-web` are dev-dependencies: only the
+# test targets use them.
+integration = []
 
 [dependencies]
 async-trait.workspace = true
-axum = { workspace = true, optional = true }
-ghinvite-web = { workspace = true, optional = true }
 restate-sdk.workspace = true
 # The EdDSA-only jsonwebtoken provider for Restate request identity
 # (`src/request_jwt.rs`).
 ed25519-dalek.workspace = true
 jsonwebtoken.workspace = true
 web-time = "1.1"
-tracing-subscriber.workspace = true
 chrono.workspace = true
 ghinvite-core.workspace = true
 ghinvite-email-vault.workspace = true
@@ -46,6 +44,8 @@ tracing.workspace = true
 # shape, so it is enabled by `ghinvite-workflows-server` and by this crate's
 # own tests — never by the library itself.
 [dev-dependencies]
+axum.workspace = true
+ghinvite-web.workspace = true
 kekring.workspace = true
 # Signed Restate requests in `endpoint_identity`'s tests.
 base64.workspace = true

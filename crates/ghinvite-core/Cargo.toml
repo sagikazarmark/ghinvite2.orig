@@ -8,15 +8,13 @@ publish.workspace = true
 [features]
 # Exposes `storage::test_suite` — the conformance suite every Storage impl
 # runs against a fresh database (see ghinvite-storage-sqlx / -d1 tests).
-test-suite = ["dep:rand_chacha"]
+test-suite = []
 
 [dependencies]
 async-trait.workspace = true
 chrono.workspace = true
 idna.workspace = true
 kekring.workspace = true
-rand.workspace = true
-rand_chacha = { workspace = true, optional = true }
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -35,5 +33,4 @@ js-sys = "0.3"
 kekring = { workspace = true, features = ["js"] }
 
 [dev-dependencies]
-rand_chacha.workspace = true
 serde_json.workspace = true

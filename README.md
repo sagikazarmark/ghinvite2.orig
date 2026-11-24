@@ -19,7 +19,7 @@ The Dioxus view components live in their own crate, `crates/ghinvite-ui`, which 
 
 ## Prerequisites
 
-- Rust 1.92 (managed by `rust-toolchain.toml` — `rustup` picks it up automatically)
+- Rust 1.100 (managed by `rust-toolchain.toml` — `rustup` picks it up automatically)
 - Node.js 20+ (for building CSS)
 - Docker (for Restate)
 

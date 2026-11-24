@@ -15,7 +15,7 @@ of the hosted-job execution work in #52; local passes do not prove hosted jobs r
 
 ## Versions and isolation
 
-- CI Rust **1.92.0**, Node **20.20.2**, wasm-bindgen **0.2.120** (checked against
+- CI Rust **1.100.0**, Node **20.20.2**, wasm-bindgen **0.2.120** (checked against
   `Cargo.lock`), worker-build **0.8.1** (checked at startup).
 - worker-build pins Binaryen/wasm-opt **129** and esbuild **0.28.0**. Its default
   bindgen version is overridden with the lockfile-matching CLI. Packaging-changing

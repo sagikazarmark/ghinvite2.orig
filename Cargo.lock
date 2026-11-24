@@ -2156,8 +2156,6 @@ dependencies = [
  "idna",
  "js-sys",
  "kekring",
- "rand 0.8.6",
- "rand_chacha 0.3.1",
  "schemars 1.2.1",
  "serde",
  "serde_json",
@@ -2439,7 +2437,6 @@ dependencies = [
  "tower",
  "tower-sessions",
  "tracing",
- "tracing-subscriber",
  "web-time",
 ]
 

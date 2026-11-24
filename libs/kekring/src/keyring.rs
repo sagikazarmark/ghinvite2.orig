@@ -437,7 +437,6 @@ impl Keyring {
     }
 
     /// The retained generations, ascending.
-    #[must_use]
     pub fn versions(&self) -> impl ExactSizeIterator<Item = u32> + '_ {
         self.0.gens.keys().copied()
     }
