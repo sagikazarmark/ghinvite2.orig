@@ -231,6 +231,30 @@ Steps in `tests/worker/admission.mjs` that schedule request expiry therefore
 anchor their timeline at the real clock and let lazy expiry in
 `decide`/`request_status` do the work.
 
+**The pinned clock must also cover the response body (workerd >= 1.20260619).**
+The shim keeps the `x-test-clock` time in an `AsyncLocalStorage` store. The
+Restate handler does not finish inside the Worker's `fetch`: in
+`RequestResponse` mode the Worker returns a streaming body, and each `pull()` of
+that wasm-backed `ReadableStream` polls the handler, which is where most clock
+reads (`ctx.run` steps such as `organization_expiry_tick_time`) happen. Up to
+workerd 1.20260617.1, workerd pumped a returned JS stream with a JS promise loop
+(`PumpToReader`), and `pull()` saw the request's store. The "draining read" path
+(autogate `workerd-autogate-enable-draining-read-on-standard-streams`, on in
+production for a while) calls `pull()` with no store, so it reads the real time.
+workerd 1.20260619.1 removed the autogate and the old path (workerd commits
+`82ff81fb02` and `c329332639`, in cloudflare/workerd#6822). From miniflare
+4.20260623.0 on, the due `tick_own_expiry` read the real time, saw nothing due
+and returned 200 without the re-read or the DELETE, so the `ORG_CANCELLATION_ONLY`,
+`CANCELLATION_ONLY` and `test:admission` own-expiry steps timed out ("convergence
+deadline exceeded"). Bisected on miniflare/workerd releases: 1.20260617.1 is good
+and 1.20260619.1 is bad, and 1.20260617.1 with that one autogate enabled is bad.
+Running a pull that no JS caller started in the empty context is defensible
+(the change shipped without a compatibility flag, but production already behaved
+so), so the fix is on our side and nothing is filed upstream. The shim now wraps a clocked response body
+in a stream whose every `pull()` re-enters the store before it reads the Worker's
+body. This works on both the old and the new path, and nothing changes for
+uncontrolled requests or for production.
+
 **One link admits about 3 per second in the workerd fixture: round trips, not a
 delay.** The `PAUSE_ONLY` burst (21 concurrent `admit`s on one unlimited link)
 is strictly serialized. It took 15-16 s on 1.7.9 and 1.8.1 alike while the Worker

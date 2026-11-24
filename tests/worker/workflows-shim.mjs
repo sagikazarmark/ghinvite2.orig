@@ -14,9 +14,29 @@ globalThis.Date = class extends RealDate {
 initSync({ module: wasmModule });
 export default {
   async fetch(request, env, ctx) {
-    return clocks.run(request.headers.has('x-test-clock') ? Number(request.headers.get('x-test-clock')) : undefined, () => execute(request, env, ctx));
+    const clock = request.headers.has('x-test-clock') ? Number(request.headers.get('x-test-clock')) : undefined;
+    const response = await clocks.run(clock, () => execute(request, env, ctx));
+    return clock === undefined || response.body === null ? response : new Response(underClock(clock, response.body), response);
   },
 };
+
+// The Restate handler runs while workerd drains the response body: each pull
+// of the wasm stream polls the handler, which reads the clock. Since workerd
+// 1.20260619 (miniflare 4.20260623.0+) the runtime drains a returned JS stream
+// with its "draining read" (the `enable-draining-read-on-standard-streams`
+// autogate, now unconditional and long on in production), and it calls
+// pull() outside the request's AsyncLocalStorage store, so those reads saw
+// the real time. Re-enter the clock for every read of the body instead.
+function underClock(clock, body) {
+  const reader = body.getReader();
+  return new ReadableStream({
+    pull: controller => clocks.run(clock, async () => {
+      const { done, value } = await reader.read();
+      if (done) controller.close(); else controller.enqueue(value);
+    }),
+    cancel: reason => reader.cancel(reason),
+  });
+}
 
 async function execute(request, env, ctx) {
     if (request.headers.has('x-test-lose-audit-ack')) {
