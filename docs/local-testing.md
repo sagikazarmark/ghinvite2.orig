@@ -7,7 +7,13 @@ cargo test -p ghinvite-web --test console_authority --test console_delegation
 cargo test -p ghinvite-web --lib authority
 cd tests/browser
 npx playwright test --config repository-selection.config.mjs
+npx playwright test --config repository-picker.config.mjs
 ```
+
+The repository picker suite runs the production create route over a
+120-repository installation (two GitHub listing pages), with and without the
+shared script: search, paging, selections kept across both, and creation of a
+link whose repositories came from different pages.
 
 The route tests exercise real scoped SQL, typed installation-token HTTP and the
 concrete Restate ingress seam. The browser tests exercise the shipped shared

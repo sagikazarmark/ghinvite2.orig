@@ -108,6 +108,25 @@ routes on port 4175 with SQLite and an injected GitHub transport. It verifies
 preserved form values/selections, a native repository reload before creation,
 and Settings recovery. It needs Chromium and Rust, but no island bundle or external services.
 
+## Repository picker
+
+```bash
+npm exec --prefix tests/browser -- playwright test --config tests/browser/repository-picker.config.mjs
+```
+
+The fixture (`repository_picker_browser_server` in
+`crates/ghinvite-web/tests/console_flow/repository_picker.rs`, port 4177) serves
+the production create route over a 120-repository installation that GitHub
+lists in two pages, with creation answered by the HTTP link-authority fixture.
+Two projects run the same tests: no JavaScript, and the shared script's
+selection checks (no island bundle is served). They page with selections kept
+ahead of the page, search with Enter and with the button (an empty description
+does not block a search), keep every value through each re-render, and create
+a link whose repositories came from three different listings. The fixture lifts
+only the per-minute authority binding; the per-request read budget and the
+5-minute cache are the production ones. Route tests cover the GitHub reads and
+validation (`cargo test -p ghinvite-web --test console_flow repository_picker`).
+
 ## Invitation link form
 
 Playwright tests the registry integration through the production new invitation
@@ -196,7 +215,11 @@ if accidentally deployed.
 - `/static/styles.css` and `/static/app.js`: production CSS and theme script.
 - `POST /console/accounts/acme/links`: JSON echo of ordered form entries,
   preserving duplicate keys. It deliberately does not implement validation or
-  create links. Server validation remains covered by Rust route tests.
+  create links. Server validation remains covered by Rust route tests. Every
+  POST also carries the repository picker's `repo_query` and `repo_page`;
+  `post()` checks each appears at most once and drops them, so assertions
+  describe the link's values. A picker search is echoed like any other POST:
+  the tests assert the island let it through, not a re-rendered page.
 
 HTML is the fixture's unmodified production renderer output. The HTTP CSP is
 read from `ghinvite-web/src/middleware/csp.rs`; no relaxed test policy or
