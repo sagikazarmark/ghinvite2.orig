@@ -77,7 +77,10 @@ every hour indefinitely. Organization chains already run when organization
 delivery is enabled, and the watchdog covers them. `OrganizationObservation::expired`
 treats an invitation as expired when this complete observation lists it, pending
 or failed, more than 7 days after creation. A failed entry stamped before its
-lifetime ended stays unclassified, as before. Team settlements follow the
+lifetime ended stays unclassified, as before. It also takes precedence when the
+same observation lists the invitation as pending too: the pending and failed
+lists are separate sequential reads, and an early failure is the more specific
+fact, so the invitation is not settled Expired and the next sweep reads again. Team settlements follow the
 organization invitation. Email invitations already settle on failed-list
 presence and are unchanged.
 
@@ -90,7 +93,9 @@ per-absence verification reads.
 
 **Throttling and failure accounting.** A walk that yields no evidence sends a
 one-way `SweepSchedule.report` naming its run token. A rate limit counts as
-*throttled*, and its retry guidance is clamped by `throttle::backoff`. Any other
+*throttled* and carries GitHub's retry guidance unclamped. The delivery path's
+one-hour `throttle::backoff` bound does not apply here, because no lock is held
+across the wait; the 24-hour cap below is the only upper bound. Any other
 read failure, including the page cap, counts as *failed*. Each run counts at most
 once per kind, and a report for any run but the latest is ignored. A throttled
 run defers the chain by `min(24 h, max(guidance, 1 h × 2^(n−1)))`, where n is the

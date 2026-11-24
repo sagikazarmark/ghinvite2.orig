@@ -180,6 +180,8 @@ account's remaining rows and says nothing about any other. A throttled walk
 reports to its account's `SweepSchedule`, which defers the whole chain, once per
 run, by `min(24 h, max(guidance, 1 h × 2^(n−1)))` for the n-th consecutive
 throttled run ([ADR 0012](adr/0012-retained-sweep-chains-with-an-hourly-watchdog.md)).
+That guidance is GitHub's own wait, not the one-hour clamp above: the deferral
+holds no lock, so only the 24-hour cap bounds it.
 The remaining rows are left to that deferred run rather than spending more of a
 quota the account has already run out of. Either way the wait is a durable delayed
 run, never a held retry: no handler keeps an invitation object's lock across a

@@ -280,7 +280,8 @@ production; [deployment](deploy.md#sweep-watchdog-86) owns enabling it (#61).
 
 Organization chains use the same watchdog. An organization invitation listed,
 pending or failed, more than 7 days after creation settles Expired; a failed-list
-entry stamped inside its lifetime stays unclassified.
+entry stamped inside its lifetime stays unclassified, even when the pending list
+still shows the invitation.
 
 `tests/sweep_schedule.rs` rehearses, on real Restate with a journaled fixture
 clock and octoemu: a missed webhook settled by the chain; three days of scheduler
