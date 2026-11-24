@@ -116,8 +116,9 @@ panic = "abort"
 strip = "debuginfo"
 
 # Wasm clocks and input draining: merged upstream as restatedev/sdk-rust#141
-# (2026-11-10) but not yet in a release. Pinned to that commit, which is 0.13.0
-# plus the fix and nothing else (later main carries a breaking TerminalErrorExt
-# change, #132). Drop this patch when 0.13.1+ ships with it.
+# (2026-11-10) but not yet in a release. Pinned to upstream main as of
+# 2026-11-24 (968ecd0): 0.13.0 plus #141, `TerminalErrorExt::terminal`
+# returning a `TerminalError` (#132, breaking; ghinvite doesn't call it) and
+# `ServiceOptions::name` (#142). Drop this patch when a release ships #141.
 [patch.crates-io]
-restate-sdk = { git = "https://github.com/restatedev/sdk-rust", rev = "8a39311" }
+restate-sdk = { git = "https://github.com/restatedev/sdk-rust", rev = "968ecd0" }

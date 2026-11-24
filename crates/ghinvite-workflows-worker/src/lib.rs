@@ -242,7 +242,7 @@ fn endpoint(env: &Env) -> worker::Result<Endpoint> {
     Ok(endpoint)
 }
 
-/// `true` for a path the pinned restate-sdk (8a39311, `endpoint/mod.rs:256`)
+/// `true` for a path the pinned restate-sdk (968ecd0, `endpoint/mod.rs:256`)
 /// cannot parse without `parts.len() - 3` underflowing: fewer than three
 /// `/`-separated parts, not ending in `health` or `discover`. Once such a
 /// request's signature verifies, debug builds panic there, which traps and
