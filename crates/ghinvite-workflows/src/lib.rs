@@ -46,6 +46,7 @@ pub mod reconcile;
 mod repository_audit;
 pub mod repository_protocol;
 mod request_control;
+mod request_jwt;
 pub mod request_owner;
 pub mod settlement;
 pub mod settlement_observation;

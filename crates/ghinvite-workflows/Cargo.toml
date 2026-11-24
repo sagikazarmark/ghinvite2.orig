@@ -22,6 +22,10 @@ async-trait.workspace = true
 axum = { workspace = true, optional = true }
 ghinvite-web = { workspace = true, optional = true }
 restate-sdk.workspace = true
+# The EdDSA-only jsonwebtoken provider for Restate request identity
+# (`src/request_jwt.rs`).
+ed25519-dalek.workspace = true
+jsonwebtoken.workspace = true
 web-time = "1.1"
 tracing-subscriber.workspace = true
 chrono.workspace = true
@@ -43,6 +47,10 @@ tracing.workspace = true
 # own tests — never by the library itself.
 [dev-dependencies]
 kekring.workspace = true
+# Signed Restate requests in `endpoint_identity`'s tests.
+base64.workspace = true
+bs58 = "0.5"
+http = "1"
 # Restate payload encodings in the PD-8 journal tests.
 bytes = "1"
 ghinvite-e2e = { path = "../ghinvite-e2e" }
