@@ -6,6 +6,54 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Whether process `pid` holds the listening socket on `address`. On Linux
+/// the socket's inode is matched against the process's descriptors, so
+/// another process that took the released port is not mistaken for the
+/// child. A root that listened would keep serving rather than exit, so its
+/// descriptors are still there to inspect. Elsewhere any listener counts.
+fn listens(pid: u32, address: std::net::SocketAddr) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let std::net::SocketAddr::V4(v4) = address else {
+            return true;
+        };
+        let local = format!(
+            "{:08X}:{:04X}",
+            u32::from_le_bytes(v4.ip().octets()),
+            v4.port()
+        );
+        let Ok(table) = std::fs::read_to_string("/proc/net/tcp") else {
+            return true;
+        };
+        // Columns: sl, local_address, rem_address, st (0A = LISTEN), …, inode.
+        let inodes: Vec<String> = table
+            .lines()
+            .skip(1)
+            .filter_map(|line| {
+                let fields: Vec<&str> = line.split_whitespace().collect();
+                (fields.get(1) == Some(&local.as_str()) && fields.get(3) == Some(&"0A"))
+                    .then(|| fields.get(9).map(|inode| format!("socket:[{inode}]")))
+                    .flatten()
+            })
+            .collect();
+        let Ok(descriptors) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+            return false;
+        };
+        descriptors.flatten().any(|fd| {
+            std::fs::read_link(fd.path()).is_ok_and(|target| {
+                inodes
+                    .iter()
+                    .any(|inode| target.as_os_str() == inode.as_str())
+            })
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (pid, address);
+        true
+    }
+}
+
 fn rejected<V: AsRef<std::ffi::OsStr> + Copy>(
     case: &str,
     values: &[(&str, V)],
@@ -44,11 +92,14 @@ fn rejected<V: AsRef<std::ffi::OsStr> + Copy>(
         if let Ok(stream) = TcpStream::connect(address) {
             // A free ephemeral port can self-connect (source port equals the
             // destination); only a connection to another socket is a listener.
-            assert_eq!(
-                stream.local_addr().unwrap(),
-                address,
-                "{case}: refused root must never listen"
-            );
+            // The port is released before the child starts, so on a busy host
+            // another process may take it: only the child's listener counts.
+            if stream.local_addr().unwrap() != address {
+                assert!(
+                    !listens(child.id(), address),
+                    "{case}: refused root must never listen"
+                );
+            }
         }
         if child.try_wait().unwrap().is_some() {
             break;
@@ -157,4 +208,16 @@ fn non_unicode_storage_mode_never_defaults_to_sqlite() {
         "GHINVITE_STORAGE invalid",
     );
     assert!(!path.exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn the_listener_check_tells_processes_apart() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    assert!(listens(std::process::id(), address));
+    // PID 1 does not hold this test's socket.
+    assert!(!listens(1, address));
+    drop(listener);
+    assert!(!listens(std::process::id(), address));
 }
