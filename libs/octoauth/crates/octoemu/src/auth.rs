@@ -221,9 +221,13 @@ pub(crate) const REQUIRES_AUTHENTICATION: &str = "Requires authentication";
 /// GitHub's answer to a token without the route's permission (documented).
 pub(crate) const NOT_ACCESSIBLE: &str = "Resource not accessible by integration";
 
-/// GitHub's message for a suspended installation (community-reported,
-/// behaviour `suspended-installation`).
+/// GitHub's message when minting a token for a suspended installation
+/// (measured, behaviour `suspended-installation`).
 pub(crate) const SUSPENDED: &str = "This installation has been suspended";
+
+/// GitHub's message for a token used while its installation is suspended
+/// (measured, behaviour `suspended-installation-tokens`).
+pub(crate) const SUSPENDED_TOKEN: &str = "This GitHub App installation is currently suspended.";
 
 /// The 403 for a token without `permission`.
 pub(crate) fn forbidden(permission: Permission) -> Response {
@@ -259,8 +263,13 @@ fn jwt_shaped(credential: &str) -> bool {
     credential.starts_with("eyJ") && credential.split('.').count() == 3
 }
 
-/// Verifies the request's credential, whatever the route.
-pub(crate) fn authenticate(shared: &Shared, headers: &HeaderMap) -> Result<Caller, Response> {
+/// Verifies the request's credential, whatever the route; `route` is the
+/// route's [`Auth`] when known (it picks the text of some rejections).
+pub(crate) fn authenticate(
+    shared: &Shared,
+    headers: &HeaderMap,
+    route: Option<Auth>,
+) -> Result<Caller, Response> {
     let Some(header) = authorization(headers) else {
         return Ok(Caller::Anonymous);
     };
@@ -270,8 +279,14 @@ pub(crate) fn authenticate(shared: &Shared, headers: &HeaderMap) -> Result<Calle
     match scheme.as_str() {
         "bearer" if jwt_shaped(&credential) => app_jwt(shared, &credential),
         // Documented: an App's JWT goes in a Bearer header. With `token`
-        // GitHub reads it as a token, which matches none.
-        "token" if jwt_shaped(&credential) => Err(unauthorized(BAD_CREDENTIALS)),
+        // GitHub reads it as a token, which matches none; on a JWT route
+        // it answers as for any credential that is not a JWT (measured).
+        "token" if jwt_shaped(&credential) => Err(unauthorized(&match route {
+            Some(Auth::App) => {
+                shared.message("jwt-error-messages", JwtError::Undecodable.message())
+            }
+            _ => BAD_CREDENTIALS.into(),
+        })),
         "bearer" | "token" if credential.starts_with("ghs_") => {
             installation_token(shared, &credential)
         }
@@ -329,25 +344,22 @@ fn app_jwt(shared: &Shared, credential: &str) -> Result<Caller, Response> {
     };
     match verified {
         Ok(verified) => {
-            if verified.used_iat_tolerance
-                && let Some(refusal) = shared.refuse("jwt-iat-tolerance")
-            {
-                return Err(refusal);
+            let assumed = [
+                (verified.used_iat_tolerance, "jwt-iat-tolerance"),
+                (verified.exp_beyond_iat, "jwt-exp-after-iat"),
+            ];
+            for (relied_on, behaviour) in assumed {
+                if relied_on && let Some(refusal) = shared.refuse(behaviour) {
+                    return Err(refusal);
+                }
             }
             Ok(Caller::App {
                 app_id: verified.app_id,
             })
         }
-        Err(error) => {
-            if error == JwtError::TooLongAfterIat
-                && let Some(refusal) = shared.refuse("jwt-exp-after-iat")
-            {
-                return Err(refusal);
-            }
-            Err(unauthorized(
-                &shared.message("jwt-error-messages", error.message()),
-            ))
-        }
+        Err(error) => Err(unauthorized(
+            &shared.message("jwt-error-messages", error.message()),
+        )),
     }
 }
 
@@ -362,6 +374,13 @@ fn installation_token(shared: &Shared, credential: &str) -> Result<Caller, Respo
         })
     };
     match outcome {
+        // Revoked with `DELETE /installation/token`, still propagating.
+        Ok((token, Some(false))) if token.revoked => {
+            match shared.refuse("token-revocation-propagation") {
+                Some(refusal) => Err(refusal),
+                None => Ok(Caller::Installation(token)),
+            }
+        }
         Ok((token, Some(false))) => Ok(Caller::Installation(token)),
         // Suspended since the token was minted.
         Ok((_, Some(true))) => Err(shared
@@ -369,13 +388,16 @@ fn installation_token(shared: &Shared, credential: &str) -> Result<Caller, Respo
             .unwrap_or_else(|| {
                 response::error(
                     StatusCode::FORBIDDEN,
-                    &shared.message("suspended-installation", SUSPENDED),
+                    &shared.message("suspended-installation-tokens", SUSPENDED_TOKEN),
                     REST_DOCS,
                 )
             })),
-        // Uninstalled since, or revoked: stateless tokens might outlive
-        // either at GitHub (unmeasured).
-        Ok((_, None)) | Err(Rejected::Revoked) => Err(shared
+        Err(Rejected::Revoked) => Err(shared
+            .refuse("token-revocation-propagation")
+            .unwrap_or_else(|| unauthorized(BAD_CREDENTIALS))),
+        // Uninstalled since: whether a stateless token outlives that at
+        // GitHub is unmeasured.
+        Ok((_, None)) | Err(Rejected::Uninstalled) => Err(shared
             .refuse("token-revocation-immediate")
             .unwrap_or_else(|| unauthorized(BAD_CREDENTIALS))),
         Err(Rejected::Unknown | Rejected::Expired) => Err(unauthorized(BAD_CREDENTIALS)),
@@ -559,6 +581,11 @@ pub(crate) fn visible_repo_for_user<'a>(
         Some(repo) if reachable(repo) => Ok(repo),
         _ => Err(not_found()),
     }
+}
+
+/// GitHub's 401 for an invalid, expired or revoked credential.
+pub(crate) fn bad_credentials() -> Response {
+    unauthorized(BAD_CREDENTIALS)
 }
 
 /// GitHub's 404.

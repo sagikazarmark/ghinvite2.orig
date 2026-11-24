@@ -106,8 +106,9 @@ fn is_pair(repo: &Repo, login: &str) -> impl Fn(&str, &str) -> bool + use<> {
 /// - a user with access otherwise (an organization member through the
 ///   base permission or ownership): added as a direct collaborator without
 ///   an invitation, `member.added`; 204 (documented);
-/// - a pending invitation: its role becomes `permission`, 201 with it
-///   (behaviour `reput-pending-invitation`);
+/// - a pending invitation: 201 with it, its role unchanged whatever
+///   `permission` asks (behaviour `reput-pending-invitation`; measured:
+///   PATCH the invitation to change it);
 /// - an expired invitation: replaced by a new one (behaviour
 ///   `reput-expired-invitation`);
 /// - otherwise a new invitation, 201, at most 50 per repository per 24 h.
@@ -146,9 +147,9 @@ pub(crate) fn put_collaborator(
             {
                 collaborator.role = role.clone();
             }
+            // Measured: no `old_permission` (behaviour `member-edited-changes`).
             let changes = (ctx.allows)("member-edited-changes").then(|| {
                 json!({
-                    "old_permission": {"from": access::legacy_permission(&state.world, &repo, &from)},
                     "permission": {
                         "from": access::role_name(&state.world, &repo, &from),
                         "to": access::role_name(&state.world, &repo, &role),
@@ -201,9 +202,9 @@ pub(crate) fn put_collaborator(
             state.world.repository_invitations.remove(index);
         } else {
             check(ctx, "reput-pending-invitation")?;
-            let invitation = &mut state.world.repository_invitations[index];
-            invitation.role = role;
-            return Ok(PutOutcome::Invited(invitation.id));
+            return Ok(PutOutcome::Invited(
+                state.world.repository_invitations[index].id,
+            ));
         }
     } else {
         check_limit(state, repo.id, now)?;

@@ -27,8 +27,10 @@ use std::collections::{BTreeMap, BTreeSet};
 /// The most repositories a token may be narrowed to (documented).
 pub(crate) const MAX_TOKEN_REPOSITORIES: usize = 500;
 
+/// `documentation_url` of the token route's errors (measured: GitHub
+/// still names the old reference page).
 const CREATE_TOKEN_DOCS: &str =
-    "https://docs.github.com/rest/apps/apps#create-an-installation-access-token-for-an-app";
+    "https://docs.github.com/rest/reference/apps#create-an-installation-access-token-for-an-app";
 
 /// The installation's granted permissions: its own, or its App's.
 pub(crate) fn granted(world: &Seed, installation: &Installation) -> BTreeMap<String, Access> {
@@ -366,12 +368,21 @@ fn selection_of(installation: &Installation, token: &TokenRecord) -> RepositoryS
     }
 }
 
-/// `DELETE /installation/token`: revokes the token in use.
+/// `DELETE /installation/token`: revokes the token in use. The revocation
+/// is recorded at once (measured: a second `DELETE` is 401 `Bad
+/// credentials` right away), while other routes keep accepting the token
+/// for [`REVOCATION_PROPAGATION`](crate::tokens::REVOCATION_PROPAGATION)
+/// (behaviour `token-revocation-propagation`).
 pub(crate) async fn revoke_token(
     State(shared): State<SharedState>,
     InstallationCaller(token): InstallationCaller,
 ) -> Response {
-    shared.state().tokens.revoke(&token.id);
+    if token.revoked {
+        return auth::bad_credentials();
+    }
+    let mut state = shared.state();
+    let now = state.clock.now();
+    state.tokens.revoke(&token.id, now);
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -409,7 +420,10 @@ impl TokenRequest {
 enum Refused {
     NotFound,
     Suspended,
+    /// A permission the installation does not hold at all.
     PermissionsNotGranted,
+    /// A higher level than the installation holds, or no level GitHub knows.
+    LevelNotGranted,
     RepositoryInaccessible,
     TooManyRepositories,
 }
@@ -421,8 +435,11 @@ struct Grant {
     repositories: Option<Vec<u64>>,
     /// Both `repositories` and `repository_ids` were given (assumed: union).
     union: bool,
-    /// `metadata: read` added though not requested (assumed).
+    /// `metadata: read` added though not requested (assumed): the token
+    /// holds it, the answer does not list it.
     implicit_metadata: bool,
+    /// Narrowed by `permissions`.
+    narrowed_permissions: bool,
 }
 
 fn level(name: &str) -> Option<Access> {
@@ -454,12 +471,14 @@ fn plan(
         Some(asked) if !asked.is_empty() => {
             let mut permissions = BTreeMap::new();
             for (name, asked) in asked {
-                let asked = level(asked).ok_or(Refused::PermissionsNotGranted)?;
-                match granted.get(name) {
-                    Some(held) if *held >= asked => {
+                let Some(held) = granted.get(name) else {
+                    return Err(Refused::PermissionsNotGranted);
+                };
+                match level(asked) {
+                    Some(asked) if *held >= asked => {
                         permissions.insert(name.clone(), asked);
                     }
-                    _ => return Err(Refused::PermissionsNotGranted),
+                    _ => return Err(Refused::LevelNotGranted),
                 }
             }
             if !permissions.contains_key("metadata") && granted.contains_key("metadata") {
@@ -473,12 +492,11 @@ fn plan(
     let reachable = installation_repos(world, installation);
     let names = request.repositories.as_deref().unwrap_or_default();
     let ids = request.repository_ids.as_deref().unwrap_or_default();
+    // Each repository is checked before the count (measured: 501 unknown
+    // IDs are refused as inaccessible).
     let repositories = if names.is_empty() && ids.is_empty() {
         None
     } else {
-        if names.len() + ids.len() > MAX_TOKEN_REPOSITORIES {
-            return Err(Refused::TooManyRepositories);
-        }
         let mut chosen = BTreeSet::new();
         for name in names {
             let repo = reachable
@@ -493,6 +511,9 @@ fn plan(
             }
             chosen.insert(*id);
         }
+        if names.len() + ids.len() > MAX_TOKEN_REPOSITORIES {
+            return Err(Refused::TooManyRepositories);
+        }
         Some(chosen.into_iter().collect())
     };
     Ok(Grant {
@@ -501,6 +522,7 @@ fn plan(
         repositories,
         union: !names.is_empty() && !ids.is_empty(),
         implicit_metadata,
+        narrowed_permissions: request.permissions.as_ref().is_some_and(|p| !p.is_empty()),
     })
 }
 
@@ -535,6 +557,10 @@ pub(crate) fn issue(
     }
     let now = state.clock.now();
     let state = &mut *state;
+    let mut answered = grant.permissions.clone();
+    if grant.implicit_metadata {
+        answered.remove("metadata");
+    }
     let (token, record) =
         state
             .tokens
@@ -546,9 +572,16 @@ pub(crate) fn issue(
     let mut body = json!({
         "token": token,
         "expires_at": timestamp(record.expires_at),
-        "permissions": record.permissions,
-        "repository_selection": selection_of(installation, &record),
+        "permissions": answered,
     });
+    // A token narrowed by permissions reports `selected` (measured once;
+    // behaviour `token-narrowed-selection`, left out in refuse-assumed
+    // mode).
+    if !grant.narrowed_permissions {
+        body["repository_selection"] = json!(selection_of(installation, &record));
+    } else if shared.allows("token-narrowed-selection") {
+        body["repository_selection"] = json!(RepositorySelection::Selected);
+    }
     if record.repository_ids.is_some() {
         body["repositories"] = installation_repos(&state.world, installation)
             .into_iter()
@@ -577,6 +610,9 @@ fn refusal(shared: &SharedState, refused: Refused) -> Response {
         Refused::PermissionsNotGranted => {
             unprocessable("The permissions requested are not granted to this installation.")
         }
+        Refused::LevelNotGranted => unprocessable(
+            "The level of access for permissions requested are not granted to this installation.",
+        ),
         Refused::RepositoryInaccessible => unprocessable(
             "There is at least one repository that does not exist or is not accessible to the parent installation.",
         ),
@@ -637,9 +673,9 @@ pub(crate) fn set_suspended(
     let action = match (suspended, installation.suspended_at.is_some()) {
         (true, false) => {
             installation.suspended_at = now;
-            installation.suspended_by = match &actor {
-                Actor::User(login) => Some(login.clone()),
-                Actor::App { .. } => None,
+            (installation.suspended_by, installation.suspended_by_app_id) = match &actor {
+                Actor::User(login) => (Some(login.clone()), None),
+                Actor::App { app_id } => (None, Some(*app_id)),
             };
             installation.updated_at = now;
             "suspend"
@@ -647,6 +683,7 @@ pub(crate) fn set_suspended(
         (false, true) => {
             installation.suspended_at = None;
             installation.suspended_by = None;
+            installation.suspended_by_app_id = None;
             installation.updated_at = now;
             "unsuspend"
         }

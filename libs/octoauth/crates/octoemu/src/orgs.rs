@@ -882,9 +882,9 @@ pub(crate) async fn get_user_membership(
 }
 
 /// `PATCH /user/memberships/orgs/{org}` with `{"state": "active"}`: accepts
-/// the pending membership; 200 with it (documented; the 202 GitHub
-/// documents for asynchronous processing is not modelled). 404 without a
-/// pending membership or invitation.
+/// the pending membership; 202 with it, already active (measured: GitHub
+/// answers 202 though its docs say 200). 404 without a pending membership
+/// or invitation.
 pub(crate) async fn accept_membership(
     State(shared): State<SharedState>,
     UserCaller(token): UserCaller,
@@ -934,7 +934,7 @@ pub(crate) async fn accept_membership(
             MembershipState::Active,
         ),
     };
-    json(StatusCode::OK, &body)
+    json(StatusCode::ACCEPTED, &body)
 }
 
 /// The admin API's `act` routes for organizations

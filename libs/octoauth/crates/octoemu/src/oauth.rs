@@ -10,7 +10,8 @@
 //! toggle) and `application_suspended` redirect to the registered callback;
 //! the token endpoint answers `incorrect_client_credentials`,
 //! `redirect_uri_mismatch`, `bad_verification_code`, `bad_refresh_token` and
-//! `unverified_user_email`, with HTTP 200 (behaviour `oauth-error-status`).
+//! `unverified_user_email`, with HTTP 200 (behaviour `oauth-error-status`),
+//! and an unknown client with a 404 `{"error": "Not Found"}` (measured).
 
 #![allow(
     clippy::result_large_err,
@@ -81,13 +82,12 @@ pub(crate) fn tokens_per_hour(world: &Seed) -> u32 {
 }
 
 /// `error_uri` of the authorize errors, as GitHub's troubleshooting page
-/// shows them.
-const AUTHORIZE_ERROR_URI: &str = "/apps/building-integrations/setting-up-and-registering-oauth-apps/troubleshooting-authorization-request-errors/";
+/// shows them; absolute on docs.github.com, as the token errors' are
+/// (measured there, assumed here).
+const AUTHORIZE_ERROR_URI: &str = "https://docs.github.com/apps/building-integrations/setting-up-and-registering-oauth-apps/troubleshooting-authorization-request-errors/";
 
-/// `error_uri` of the token errors, as GitHub's troubleshooting page shows
-/// them.
-const TOKEN_ERROR_URI: &str =
-    "/apps/managing-oauth-apps/troubleshooting-oauth-app-access-token-request-errors/";
+/// `error_uri` of the token errors (measured).
+const TOKEN_ERROR_URI: &str = "https://docs.github.com/apps/managing-oauth-apps/troubleshooting-oauth-app-access-token-request-errors/";
 
 /// An authorize error: `(error, error_description, anchor)`.
 struct AuthorizeError(&'static str, &'static str, &'static str);
@@ -131,15 +131,11 @@ const UNVERIFIED_EMAIL: TokenError = TokenError(
     "The user must have a verified primary email.",
     "#unverified_user_email",
 );
+// Measured: GitHub points a bad refresh token at the bad code's anchor.
 const BAD_REFRESH: TokenError = TokenError(
     "bad_refresh_token",
     "The refresh token passed is incorrect or expired.",
-    "#bad-refresh-token",
-);
-const UNSUPPORTED_GRANT: TokenError = TokenError(
-    "unsupported_grant_type",
-    "The grant type is not supported.",
-    "#unsupported-grant-type",
+    "#bad-verification-code",
 );
 
 // --- redirect URIs -----------------------------------------------------------
@@ -502,12 +498,16 @@ struct Reply {
 
 impl Reply {
     fn send(&self, fields: &[(&str, Value)]) -> Response {
+        self.send_with(StatusCode::OK, fields)
+    }
+
+    fn send_with(&self, status: StatusCode, fields: &[(&str, Value)]) -> Response {
         if self.json {
             let object: serde_json::Map<String, Value> = fields
                 .iter()
                 .map(|(name, value)| ((*name).to_owned(), value.clone()))
                 .collect();
-            crate::response::json(StatusCode::OK, &Value::Object(object))
+            crate::response::json(status, &Value::Object(object))
         } else {
             let text: Vec<(&str, String)> = fields
                 .iter()
@@ -520,7 +520,7 @@ impl Reply {
                 })
                 .collect();
             (
-                StatusCode::OK,
+                status,
                 [(
                     CONTENT_TYPE,
                     HeaderValue::from_static("application/x-www-form-urlencoded; charset=utf-8"),
@@ -549,9 +549,12 @@ impl Reply {
     }
 }
 
-/// `POST /login/oauth/access_token`: a code (`grant_type` absent or
-/// `authorization_code`) or a refresh token (`grant_type=refresh_token`)
-/// for a user access token.
+/// `POST /login/oauth/access_token`: a code (`grant_type` absent,
+/// `authorization_code` or anything but `refresh_token`: behaviour
+/// `unsupported-grant-type`) or a refresh token (`grant_type=refresh_token`)
+/// for a user access token. A `client_id` naming no App is a 404
+/// `{"error": "Not Found"}`; a known one with the wrong secret is
+/// `incorrect_client_credentials` (measured).
 pub(crate) async fn access_token(
     State(shared): State<SharedState>,
     headers: HeaderMap,
@@ -570,68 +573,74 @@ pub(crate) async fn access_token(
     let now = state.clock.now();
     let Some(app) = get("client_id")
         .and_then(|id| state.world.apps.iter().find(|app| app.client_id == id))
-        .filter(|app| get("client_secret") == Some(app.client_secret.as_str()))
         .cloned()
     else {
-        return reply.error(&shared, &INCORRECT_CLIENT, None);
+        if let Some(refusal) = shared.refuse("oauth-error-status") {
+            return refusal;
+        }
+        return reply.send_with(StatusCode::NOT_FOUND, &[("error", "Not Found".into())]);
     };
-    let (user_id, login, counted) = match get("grant_type") {
-        None | Some("authorization_code") => {
-            let Some(code) =
-                get("code").and_then(|code| state.user_tokens.take_code(code, app.id, now))
-            else {
-                return reply.error(&shared, &BAD_CODE, None);
-            };
-            if let Some(given) = get("redirect_uri") {
-                match registered(&shared, &app, given) {
-                    Ok(true) if given == code.redirect_uri => {}
-                    Ok(_) => return reply.error(&shared, &TOKEN_REDIRECT_MISMATCH, None),
-                    Err(refusal) => return refusal,
-                }
+    if get("client_secret") != Some(app.client_secret.as_str()) {
+        return reply.error(&shared, &INCORRECT_CLIENT, None);
+    }
+    let grant_type = get("grant_type");
+    if !matches!(
+        grant_type,
+        None | Some("authorization_code" | "refresh_token")
+    ) && let Some(refusal) = shared.refuse("unsupported-grant-type")
+    {
+        return refusal;
+    }
+    // GitHub reads any grant type but a refresh as the code grant
+    // (measured: `password` with a bad code is `bad_verification_code`).
+    let (user_id, login, counted) = if grant_type == Some("refresh_token") {
+        let Some(refreshed) = get("refresh_token")
+            .and_then(|token| state.user_tokens.redeem_refresh(token, app.id, now))
+        else {
+            return reply.error(&shared, &BAD_REFRESH, Some("bad-refresh-token-text"));
+        };
+        (refreshed.user_id, refreshed.login, false)
+    } else {
+        let Some(code) =
+            get("code").and_then(|code| state.user_tokens.take_code(code, app.id, now))
+        else {
+            return reply.error(&shared, &BAD_CODE, None);
+        };
+        if let Some(given) = get("redirect_uri") {
+            match registered(&shared, &app, given) {
+                Ok(true) if given == code.redirect_uri => {}
+                Ok(_) => return reply.error(&shared, &TOKEN_REDIRECT_MISMATCH, None),
+                Err(refusal) => return refusal,
             }
-            let proven = match (&code.challenge, get("code_verifier")) {
-                (None, None) => true,
-                (Some(challenge), Some(verifier)) => {
-                    URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes())) == *challenge
-                }
-                _ => false,
-            };
-            if !proven {
-                if let Some(refusal) = shared.refuse("pkce-exchange-errors") {
-                    return refusal;
-                }
-                return reply.error(&shared, &BAD_CODE, None);
-            }
-            let verified = state
-                .world
-                .users
-                .iter()
-                .find(|u| u.id == code.user_id)
-                .is_none_or(|user| {
-                    user.email_addresses()
-                        .iter()
-                        .find(|e| e.primary)
-                        .is_none_or(|e| e.verified)
-                });
-            if !verified {
-                return reply.error(&shared, &UNVERIFIED_EMAIL, None);
-            }
-            (code.user_id, code.login, true)
         }
-        Some("refresh_token") => {
-            let Some(refreshed) = get("refresh_token")
-                .and_then(|token| state.user_tokens.redeem_refresh(token, app.id, now))
-            else {
-                return reply.error(&shared, &BAD_REFRESH, Some("bad-refresh-token-text"));
-            };
-            (refreshed.user_id, refreshed.login, false)
-        }
-        Some(_) => {
-            if let Some(refusal) = shared.refuse("unsupported-grant-type") {
+        let proven = match (&code.challenge, get("code_verifier")) {
+            (None, None) => true,
+            (Some(challenge), Some(verifier)) => {
+                URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes())) == *challenge
+            }
+            _ => false,
+        };
+        if !proven {
+            if let Some(refusal) = shared.refuse("pkce-exchange-errors") {
                 return refusal;
             }
-            return reply.error(&shared, &UNSUPPORTED_GRANT, None);
+            return reply.error(&shared, &BAD_CODE, None);
         }
+        let verified = state
+            .world
+            .users
+            .iter()
+            .find(|u| u.id == code.user_id)
+            .is_none_or(|user| {
+                user.email_addresses()
+                    .iter()
+                    .find(|e| e.primary)
+                    .is_none_or(|e| e.verified)
+            });
+        if !verified {
+            return reply.error(&shared, &UNVERIFIED_EMAIL, None);
+        }
+        (code.user_id, code.login, true)
     };
     if state.user_tokens.live_count(app.id, user_id, now) >= TOKENS_PER_USER_APP
         && let Some(refusal) = shared.refuse("user-token-cap")

@@ -503,7 +503,8 @@ async fn accepting_through_the_user_route_activates_membership_and_teams() {
         Some(json!({"state": "active"})),
     )
     .await;
-    assert_eq!(accepted.status, StatusCode::OK, "{}", accepted.body);
+    // GitHub answers 202, with the membership already active.
+    assert_eq!(accepted.status, StatusCode::ACCEPTED, "{}", accepted.body);
     assert_eq!(accepted.body["state"], "active");
     assert_eq!(accepted.body["role"], "member");
     assert_eq!(accepted.body["organization"]["login"], "acme");

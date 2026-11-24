@@ -570,6 +570,16 @@ pub struct Repo {
     /// Creation time; the clock's start when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<DateTime<Utc>>,
+    /// Whether the wiki is on (`has_wiki`); true, the REST API's default
+    /// for a new repository, when absent.
+    #[serde(default = "yes")]
+    pub has_wiki: bool,
+    /// Whether downloads are on (`has_downloads`); true when absent.
+    #[serde(default = "yes")]
+    pub has_downloads: bool,
+    /// Whether forking is allowed (`allow_forking`); true when absent.
+    #[serde(default = "yes")]
+    pub allow_forking: bool,
 }
 
 /// A repository's visibility.
@@ -606,6 +616,9 @@ impl Repo {
             private: false,
             visibility: None,
             created_at: None,
+            has_wiki: true,
+            has_downloads: true,
+            allow_forking: true,
         }
     }
 
@@ -613,6 +626,27 @@ impl Repo {
     #[must_use]
     pub fn private(mut self) -> Self {
         self.private = true;
+        self
+    }
+
+    /// Turns the wiki on or off.
+    #[must_use]
+    pub fn has_wiki(mut self, on: bool) -> Self {
+        self.has_wiki = on;
+        self
+    }
+
+    /// Turns downloads on or off.
+    #[must_use]
+    pub fn has_downloads(mut self, on: bool) -> Self {
+        self.has_downloads = on;
+        self
+    }
+
+    /// Allows or forbids forking.
+    #[must_use]
+    pub fn allow_forking(mut self, on: bool) -> Self {
+        self.allow_forking = on;
         self
     }
 
@@ -658,6 +692,10 @@ pub struct App {
     /// The owning account's login, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
+    /// The homepage URL given at registration (`external_url`); the App's
+    /// page on the emulator when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_url: Option<String>,
     /// The OAuth client ID, unique across Apps.
     pub client_id: String,
     /// The OAuth client secret. Redacted from `GET /__octoemu/state`.
@@ -707,6 +745,7 @@ impl App {
             slug: slug.into(),
             name: None,
             owner: None,
+            external_url: None,
             client_id: client_id.into(),
             client_secret: client_secret.into(),
             public_keys: Vec::new(),
@@ -753,6 +792,13 @@ impl App {
     #[must_use]
     pub fn owner(mut self, login: impl Into<String>) -> Self {
         self.owner = Some(login.into());
+        self
+    }
+
+    /// Sets the homepage URL (`external_url`).
+    #[must_use]
+    pub fn external_url(mut self, url: impl Into<String>) -> Self {
+        self.external_url = Some(url.into());
         self
     }
 
@@ -883,6 +929,12 @@ pub struct Installation {
     /// `suspended_at`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suspended_by: Option<String>,
+    /// The App that suspended it (its own App, through `PUT
+    /// /app/installations/{installation_id}/suspended`), if an App did: its
+    /// bot account is reported as `suspended_by`. Only with `suspended_at`,
+    /// not with `suspended_by`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspended_by_app_id: Option<u64>,
     /// Creation time; the clock's start when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<DateTime<Utc>>,
@@ -905,6 +957,7 @@ impl Installation {
             events: None,
             suspended_at: None,
             suspended_by: None,
+            suspended_by_app_id: None,
             created_at: None,
             updated_at: None,
         }
@@ -2046,6 +2099,21 @@ impl Check {
                     );
                 }
                 self.account(format!("{at}.suspended_by"), by, Some(AccountKind::User));
+            }
+            if let Some(by) = installation.suspended_by_app_id {
+                if installation.suspended_at.is_none() || installation.suspended_by.is_some() {
+                    self.problem(
+                        format!("{at}.suspended_by_app_id"),
+                        "only a suspended installation names who suspended it, a user or an App"
+                            .into(),
+                    );
+                }
+                if !self.apps.contains_key(&by) {
+                    self.problem(
+                        format!("{at}.suspended_by_app_id"),
+                        format!("no App with ID {by}"),
+                    );
+                }
             }
             let Some(app) = app else { continue };
             for (name, access) in installation.permissions.iter().flatten() {

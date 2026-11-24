@@ -226,7 +226,8 @@ async fn octoauth_mints_a_token_that_lists_repositories_page_by_page() {
         .unwrap();
     let secret = token.expose_secret();
     assert!(secret.starts_with("ghs_4_"), "{secret}");
-    assert!((500..600).contains(&secret.len()), "{}", secret.len());
+    // GitHub's are 383 characters.
+    assert!((383..391).contains(&secret.len()), "{}", secret.len());
     let lifetime = token
         .expires_at()
         .duration_since(token.issued_at().unwrap())
@@ -322,6 +323,81 @@ async fn the_client_id_is_an_issuer_too_and_installations_have_ghinvites_fields(
     assert!(requests.body[0]["created_at"].is_string());
 }
 
+#[tokio::test]
+async fn the_app_its_bot_and_its_installations_in_githubs_shapes() {
+    let mut world = seed();
+    world.apps[0].external_url = Some("https://example.test/invite-bot".into());
+    world.apps[0].events = vec!["organization".into(), "member".into()];
+    world.repos.push(
+        Repo::new(150, "acme", "quiet")
+            .private()
+            .has_wiki(false)
+            .has_downloads(false)
+            .allow_forking(false),
+    );
+    let emulator = Emulator::start(world).await.unwrap();
+    let app = bearer(&jwt(PRIVATE_KEY, &claims(&emulator, json!(4))));
+
+    // Events sorted; the registered homepage URL.
+    let me = get(&emulator, "/app", &app).await;
+    assert_eq!(me.body["events"], json!(["member", "organization"]));
+    assert_eq!(me.body["external_url"], "https://example.test/invite-bot");
+    let org = get(&emulator, "/app/installations/5", &app).await;
+    assert_eq!(org.body["events"], json!(["member", "organization"]));
+    // An organization's installation settings live under it.
+    let base = emulator.api_base();
+    assert_eq!(
+        org.body["html_url"],
+        format!("{base}/organizations/acme/settings/installations/5")
+    );
+    let user = get(&emulator, "/app/installations/6", &app).await;
+    assert_eq!(
+        user.body["html_url"],
+        format!("{base}/settings/installations/6")
+    );
+
+    // Suspended by the App itself: its bot, as GET /users answers it.
+    let suspend_url = format!("{base}/app/installations/5/suspended");
+    let suspended = call(reqwest::Method::PUT, &suspend_url, Some(&app), None).await;
+    assert_eq!(suspended.status, StatusCode::NO_CONTENT);
+    let shown = get(&emulator, "/app/installations/5", &app).await;
+    let bot = &shown.body["suspended_by"];
+    assert_eq!(bot["login"], "invite-bot[bot]");
+    assert_eq!(bot["type"], "Bot");
+    assert_eq!(bot["url"], format!("{base}/users/invite-bot%5Bbot%5D"));
+    assert_eq!(
+        bot["repos_url"],
+        format!("{base}/users/invite-bot%5Bbot%5D/repos")
+    );
+    assert_eq!(bot["html_url"], format!("{base}/apps/invite-bot"));
+    let profile = call(
+        reqwest::Method::GET,
+        &format!("{base}/users/invite-bot%5Bbot%5D"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(profile.status, StatusCode::OK);
+    assert_eq!(profile.body["id"], bot["id"]);
+    assert_eq!(profile.body["type"], "Bot");
+    let lifted = call(reqwest::Method::DELETE, &suspend_url, Some(&app), None).await;
+    assert_eq!(lifted.status, StatusCode::NO_CONTENT);
+    let shown = get(&emulator, "/app/installations/5", &app).await;
+    assert_eq!(shown.body["suspended_by"], Value::Null);
+
+    // Seeded repository settings.
+    let token = create_token(&emulator, 5, json!({})).await;
+    let token = bearer(token.body["token"].as_str().unwrap());
+    let quiet = get(&emulator, "/repos/acme/quiet", &token).await;
+    for flag in ["has_wiki", "has_downloads", "allow_forking"] {
+        assert_eq!(quiet.body[flag], false, "{flag}");
+    }
+    let default = get(&emulator, "/repos/acme/r01", &token).await;
+    for flag in ["has_wiki", "has_downloads", "allow_forking"] {
+        assert_eq!(default.body[flag], true, "{flag}");
+    }
+}
+
 /// Lists installation 5's repositories through `with_token`, counting the
 /// attempts; the token's ID.
 async fn list_with_provider(
@@ -401,6 +477,20 @@ async fn revoked_tokens_are_refused() {
     )
     .await;
     assert_eq!(revoke.status, StatusCode::NO_CONTENT);
+    // GitHub records the revocation at once: a second DELETE is a 401.
+    let again = call(
+        reqwest::Method::DELETE,
+        &format!("{}/installation/token", emulator.api_base()),
+        Some(&auth),
+        None,
+    )
+    .await;
+    assert_eq!(again.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(again.body["message"], "Bad credentials");
+    // Other routes see it once it has propagated (500 ms on the clock).
+    let during = get(&emulator, "/installation/repositories", &auth).await;
+    assert_eq!(during.status, StatusCode::OK);
+    emulator.advance_clock(Duration::from_secs(1));
     let after = get(&emulator, "/installation/repositories", &auth).await;
     assert_eq!(after.status, StatusCode::UNAUTHORIZED);
     assert_eq!(after.body["message"], "Bad credentials");
@@ -436,7 +526,7 @@ async fn suspension_blocks_tokens_and_octoauth_classifies_it() {
     assert_eq!(refused.status, StatusCode::FORBIDDEN);
     assert_eq!(
         refused.body["message"],
-        "This installation has been suspended"
+        "This GitHub App installation is currently suspended."
     );
     assert_eq!(
         refused.api_error(),
@@ -591,8 +681,16 @@ async fn an_unsupported_api_version_is_a_400_on_the_api_only() {
         assert_eq!(refused.status(), StatusCode::BAD_REQUEST, "{version}");
         let body: Value = serde_json::from_str(&refused.text().await.unwrap()).unwrap();
         assert_eq!(
-            body["message"],
-            format!("Unsupported API version {version}")
+            body,
+            json!({
+                "message": "Bad Request",
+                "errors": format!(
+                    "The version you specified in the \"X-GitHub-API-Version\" request header, \
+                     \"{version}\", is not a supported version. The following versions are \
+                     currently supported: \"2026-03-10\" (most recent) and \"2022-11-28\"."
+                ),
+                "documentation_url": "https://docs.github.com/rest",
+            })
         );
     }
     // The web routes ignore it.
@@ -632,16 +730,18 @@ async fn permissions_and_repositories_narrow_and_never_widen() {
     let narrow = create_token(&emulator, 5, json!({"permissions": {"metadata": "read"}})).await;
     assert_eq!(narrow.status, StatusCode::CREATED);
     assert_eq!(narrow.body["permissions"], json!({"metadata": "read"}));
-    assert_eq!(narrow.body["repository_selection"], "all");
+    // GitHub reports a token narrowed by permissions as `selected`.
+    assert_eq!(narrow.body["repository_selection"], "selected");
     assert!(narrow.body.get("repositories").is_none());
     assert!(app.installation(5).access_token(&metadata).await.is_ok());
 
-    // Members only: metadata comes along (assumed).
+    // Members only: the answer lists what was asked; the token still
+    // reads metadata (assumed).
     let members = create_token(&emulator, 5, json!({"permissions": {"members": "write"}})).await;
-    assert_eq!(
-        members.body["permissions"],
-        json!({"members": "write", "metadata": "read"})
-    );
+    assert_eq!(members.body["permissions"], json!({"members": "write"}));
+    let token = bearer(members.body["token"].as_str().unwrap());
+    let repo = get(&emulator, "/repos/acme/r01", &token).await;
+    assert_eq!(repo.status, StatusCode::OK);
 
     // Ungranted (the App has it, the installation does not) or higher: 422,
     // which octoauth classifies.
@@ -654,10 +754,23 @@ async fn permissions_and_repositories_narrow_and_never_widen() {
             .unwrap_err(),
         Error::PermissionsNotGranted
     );
-    for permissions in [
-        json!({"members": "admin"}),
-        json!({"metadata": "write"}),
-        json!({"members": "superuser"}),
+    for (permissions, message) in [
+        (
+            json!({"issues": "write"}),
+            "The permissions requested are not granted to this installation.",
+        ),
+        (
+            json!({"members": "admin"}),
+            "The level of access for permissions requested are not granted to this installation.",
+        ),
+        (
+            json!({"metadata": "write"}),
+            "The level of access for permissions requested are not granted to this installation.",
+        ),
+        (
+            json!({"members": "superuser"}),
+            "The level of access for permissions requested are not granted to this installation.",
+        ),
     ] {
         let reply = create_token(&emulator, 5, json!({"permissions": permissions})).await;
         assert_eq!(
@@ -665,9 +778,10 @@ async fn permissions_and_repositories_narrow_and_never_widen() {
             StatusCode::UNPROCESSABLE_ENTITY,
             "{permissions}"
         );
+        assert_eq!(reply.body["message"], message, "{permissions}");
         assert_eq!(
-            reply.body["message"],
-            "The permissions requested are not granted to this installation."
+            reply.body["documentation_url"],
+            "https://docs.github.com/rest/reference/apps#create-an-installation-access-token-for-an-app"
         );
     }
 
@@ -718,10 +832,14 @@ async fn permissions_and_repositories_narrow_and_never_widen() {
             "There is at least one repository that does not exist or is not accessible to the parent installation."
         );
     }
+    // Each repository is checked before the count, as on GitHub.
     let too_many: Vec<u64> = (0..501).collect();
     let reply = create_token(&emulator, 5, json!({"repository_ids": too_many})).await;
     assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(reply.body["message"], "Validation Failed");
+    assert_eq!(
+        reply.body["message"],
+        "There is at least one repository that does not exist or is not accessible to the parent installation."
+    );
 
     let malformed = call(
         reqwest::Method::POST,
@@ -864,7 +982,11 @@ async fn app_jwts_are_checked_strictly() {
         ok
     );
 
+    // GitHub's texts, as the fidelity suite measured them.
     let decode = "A JSON web token could not be decoded";
+    let bad = "Bad credentials";
+    let not_integer = "'Issuer' claim ('iss') must be an Integer";
+    let no_iat = "Missing 'issued at' claim ('iat') in assertion";
     let iat = "'Issued at' claim ('iat') must be an Integer representing the time that the assertion was issued";
     let exp = "'Expiration time' claim ('exp') must be a numeric value representing the future time at which the assertion expires";
     let far = "'Expiration time' claim ('exp') is too far in the future";
@@ -876,14 +998,19 @@ async fn app_jwts_are_checked_strictly() {
             decode,
         ),
         (
-            "unknown iss",
+            "unknown client ID",
             jwt(PRIVATE_KEY, &claims(&emulator, json!("Iv23.nope"))),
+            not_integer,
+        ),
+        (
+            "unknown App ID",
+            jwt(PRIVATE_KEY, &claims(&emulator, json!(99))),
             "Integration not found",
         ),
         (
             "no iss",
             jwt(PRIVATE_KEY, &json!({"iat": now - 60, "exp": now + 540})),
-            "Integration not found",
+            not_integer,
         ),
         (
             "exp too far",
@@ -894,36 +1021,36 @@ async fn app_jwts_are_checked_strictly() {
             far,
         ),
         (
-            "exp > iat + 600",
-            jwt(
-                PRIVATE_KEY,
-                &json!({"iat": now - 120, "exp": now + 540, "iss": 4}),
-            ),
-            far,
-        ),
-        (
             "expired",
             jwt(
                 PRIVATE_KEY,
                 &json!({"iat": now - 700, "exp": now - 100, "iss": 4}),
             ),
-            exp,
+            bad,
         ),
         (
             "no exp",
             jwt(PRIVATE_KEY, &json!({"iat": now - 60, "iss": 4})),
+            bad,
+        ),
+        (
+            "non-numeric exp",
+            jwt(
+                PRIVATE_KEY,
+                &json!({"iat": now - 60, "exp": "soon", "iss": 4}),
+            ),
             exp,
         ),
         (
             "no iat",
             jwt(PRIVATE_KEY, &json!({"exp": now + 540, "iss": 4})),
-            iat,
+            no_iat,
         ),
         (
-            "string iat",
+            "non-numeric iat",
             jwt(
                 PRIVATE_KEY,
-                &json!({"iat": (now - 60).to_string(), "exp": now + 540, "iss": 4}),
+                &json!({"iat": "then", "exp": now + 540, "iss": 4}),
             ),
             iat,
         ),
@@ -933,7 +1060,7 @@ async fn app_jwts_are_checked_strictly() {
                 PRIVATE_KEY,
                 &json!({"iat": now + 120, "exp": now + 540, "iss": 4}),
             ),
-            iat,
+            bad,
         ),
         (
             "HS256",
@@ -942,7 +1069,7 @@ async fn app_jwts_are_checked_strictly() {
                 &json!({"alg": "HS256", "typ": "JWT"}),
                 &claims(&emulator, json!(4)),
             ),
-            decode,
+            bad,
         ),
     ];
     for (case, credential, message) in cases {
@@ -963,18 +1090,34 @@ async fn app_jwts_are_checked_strictly() {
         (401, decode.to_owned()),
         "bad signature"
     );
-    assert_eq!(status_of("eyJ.not.ajwt").await, (401, decode.to_owned()));
+    assert_eq!(status_of("eyJ.not.ajwt").await, (401, bad.to_owned()));
 
-    // The `token` scheme is for tokens, not JWTs.
+    // The `token` scheme is for tokens, not JWTs: on a JWT route GitHub
+    // answers as for any credential that is not a JWT, elsewhere `Bad
+    // credentials`.
     let reply = get(&emulator, "/app", &format!("token {valid}")).await;
     assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(reply.body["message"], decode);
+    let reply = get(
+        &emulator,
+        "/installation/repositories",
+        &format!("token {valid}"),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(reply.body["message"], bad);
 
-    // A slightly early `iat` passes on the (assumed) tolerance.
-    let early = jwt(
-        PRIVATE_KEY,
-        &json!({"iat": now + 10, "exp": now + 540, "iss": 4}),
-    );
-    assert_eq!(status_of(&early).await, ok);
+    // Accepted, as GitHub accepts them: an `iat` up to 60 s early (the
+    // assumed tolerance), a numeric string `iat`, and an `exp` more than
+    // 10 minutes after `iat` but within 10 minutes of now.
+    for claims in [
+        json!({"iat": now + 10, "exp": now + 540, "iss": 4}),
+        json!({"iat": now + 55, "exp": now + 540, "iss": 4}),
+        json!({"iat": (now - 60).to_string(), "exp": now + 540, "iss": 4}),
+        json!({"iat": now - 120, "exp": now + 540, "iss": 4}),
+    ] {
+        assert_eq!(status_of(&jwt(PRIVATE_KEY, &claims)).await, ok, "{claims}");
+    }
 }
 
 #[tokio::test]
@@ -1067,7 +1210,15 @@ async fn refuse_assumed_mode_refuses_guesses_and_withholds_guessed_messages() {
     assert_eq!(revoke.status, StatusCode::NO_CONTENT);
     let reply = get(&emulator, "/installation/repositories", &auth).await;
     assert_eq!(reply.status, StatusCode::NOT_IMPLEMENTED);
-    assert_eq!(reply.body["behaviour"], "token-revocation-immediate");
+    assert_eq!(reply.body["behaviour"], "token-revocation-propagation");
+
+    let long = jwt(
+        PRIVATE_KEY,
+        &json!({"iat": now - 120, "exp": now + 540, "iss": 4}),
+    );
+    let reply = get(&emulator, "/app", &bearer(&long)).await;
+    assert_eq!(reply.status, StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(reply.body["behaviour"], "jwt-exp-after-iat");
 
     let members = create_token(&emulator, 5, json!({"permissions": {"members": "write"}})).await;
     assert_eq!(members.status, StatusCode::NOT_IMPLEMENTED);

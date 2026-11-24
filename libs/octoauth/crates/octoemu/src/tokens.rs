@@ -1,12 +1,12 @@
 //! Installation access tokens: minted in GitHub's stateless format
-//! (`ghs_<APPID>_<JWT>`, about 520 characters), signed with a key drawn per
-//! emulator instance, and looked up on every use so revocation, expiry and
-//! scope are enforced.
+//! (`ghs_<APPID>_<JWT>`, 383 characters like GitHub's), signed with a key
+//! drawn per emulator instance, and looked up on every use so revocation,
+//! expiry and scope are enforced.
 //!
-//! The inner JWT is HS256 over `{iss, sub, aud, app_id, installation_id,
-//! jti, iat, nbf, exp, pad}`; GitHub's own claims and algorithm are not
-//! public, so the inner format is `assumed` (behaviour
-//! `installation-token-format`). Clients treat tokens as opaque.
+//! The inner JWT is HS256 over `{iss, app_id, installation_id, jti, iat,
+//! exp, pad}`; GitHub's own claims and algorithm are not public, so the
+//! inner format is `assumed` (behaviour `installation-token-format`).
+//! Clients treat tokens as opaque.
 
 use crate::seed::Access;
 use base64::Engine as _;
@@ -20,8 +20,17 @@ use std::collections::{BTreeMap, HashMap};
 /// An installation token's lifetime (documented: one hour).
 pub(crate) const LIFETIME: TimeDelta = TimeDelta::hours(1);
 
-/// The length minted tokens are padded to, like GitHub's (about 520).
-const TARGET_LENGTH: usize = 520;
+/// The length minted tokens are padded to: GitHub's, measured (fidelity
+/// scenario `token-revocation-delete`, 2026-11-24: 383 characters every
+/// time).
+const TARGET_LENGTH: usize = 383;
+
+/// How long a token revoked with `DELETE /installation/token` keeps
+/// working on other routes (behaviour `token-revocation-propagation`).
+/// Measured against GitHub (2026-11-24): of eight uses right after the
+/// `DELETE`, two were accepted (the later 0.41 s after it) and six refused
+/// (the earliest 0.11 s after it); every use from 0.78 s on was refused.
+pub(crate) const REVOCATION_PROPAGATION: TimeDelta = TimeDelta::milliseconds(500);
 
 /// `{"alg":"HS256","typ":"JWT"}`, base64url.
 const HEADER: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
@@ -44,7 +53,13 @@ pub(crate) struct TokenRecord {
     pub(crate) repository_ids: Option<Vec<u64>>,
     pub(crate) issued_at: DateTime<Utc>,
     pub(crate) expires_at: DateTime<Utc>,
+    /// Revoked, by `DELETE /installation/token` or by uninstalling.
     pub(crate) revoked: bool,
+    /// When `DELETE /installation/token` revoked it: until
+    /// [`REVOCATION_PROPAGATION`] later, [`Tokens::verify`] still accepts
+    /// it. `None` for a token revoked by uninstalling (at once).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) revoked_at: Option<DateTime<Utc>>,
 }
 
 impl TokenRecord {
@@ -71,8 +86,11 @@ pub(crate) enum Rejected {
     Unknown,
     /// Past `expires_at` on the virtual clock.
     Expired,
-    /// Revoked with `DELETE /installation/token` or by uninstalling.
+    /// Revoked with `DELETE /installation/token`, and the revocation has
+    /// propagated.
     Revoked,
+    /// Revoked by uninstalling its installation.
+    Uninstalled,
 }
 
 /// Every token minted by one emulator instance.
@@ -142,13 +160,10 @@ impl Tokens {
         let token = loop {
             let claims = serde_json::json!({
                 "iss": "octoemu",
-                "sub": format!("installation/{installation_id}"),
-                "aud": "api.github.com",
                 "app_id": app_id,
                 "installation_id": installation_id,
                 "jti": jti,
                 "iat": issued_at.timestamp(),
-                "nbf": issued_at.timestamp(),
                 "exp": expires_at.timestamp(),
                 "pad": pad,
             });
@@ -174,17 +189,25 @@ impl Tokens {
             issued_at,
             expires_at,
             revoked: false,
+            revoked_at: None,
         };
         self.by_jti.insert(jti, record.clone());
         (token, record)
     }
 
     /// The record of a token this instance minted, checked for signature,
-    /// expiry (at `now`) and revocation.
+    /// expiry (at `now`) and revocation. A token revoked with `DELETE
+    /// /installation/token` less than [`REVOCATION_PROPAGATION`] ago is
+    /// still accepted (with `revoked` set).
     pub(crate) fn verify(&self, token: &str, now: DateTime<Utc>) -> Result<&TokenRecord, Rejected> {
         let jti = self.jti_of(token).ok_or(Rejected::Unknown)?;
         let record = self.by_jti.get(&jti).ok_or(Rejected::Unknown)?;
-        if record.revoked {
+        let propagating = record
+            .revoked_at
+            .is_some_and(|at| now < at + REVOCATION_PROPAGATION);
+        if record.revoked && record.revoked_at.is_none() {
+            Err(Rejected::Uninstalled)
+        } else if record.revoked && !propagating {
             Err(Rejected::Revoked)
         } else if now >= record.expires_at {
             Err(Rejected::Expired)
@@ -217,20 +240,24 @@ impl Tokens {
         claims["jti"].as_str().map(str::to_owned)
     }
 
-    /// Revokes the token with record ID `id`.
-    pub(crate) fn revoke(&mut self, id: &str) {
+    /// Revokes the token with record ID `id` at `now`
+    /// (`DELETE /installation/token`); a token already revoked keeps its
+    /// first revocation.
+    pub(crate) fn revoke(&mut self, id: &str, now: DateTime<Utc>) {
         for record in self.by_jti.values_mut() {
-            if record.id == id {
+            if record.id == id && !record.revoked {
                 record.revoked = true;
+                record.revoked_at = Some(now);
             }
         }
     }
 
-    /// Revokes every token of an installation (uninstalling).
+    /// Revokes every token of an installation (uninstalling), at once.
     pub(crate) fn revoke_installation(&mut self, installation_id: u64) {
         for record in self.by_jti.values_mut() {
             if record.installation_id == installation_id {
                 record.revoked = true;
+                record.revoked_at = None;
             }
         }
     }
@@ -283,7 +310,16 @@ mod tests {
             tokens.verify(&token, now() + LIFETIME),
             Err(Rejected::Expired)
         );
-        tokens.revoke(&record.id);
-        assert_eq!(tokens.verify(&token, now()), Err(Rejected::Revoked));
+        tokens.revoke(&record.id, now());
+        // Still accepted while the revocation propagates, then refused.
+        let accepted = tokens.verify(&token, now()).unwrap();
+        assert!(accepted.revoked);
+        let later = now() + REVOCATION_PROPAGATION;
+        assert_eq!(tokens.verify(&token, later), Err(Rejected::Revoked));
+        // Uninstalling revokes at once.
+        let (other, _) = tokens.mint(12, 34, BTreeMap::new(), None, now());
+        tokens.revoke_installation(34);
+        assert_eq!(tokens.verify(&other, now()), Err(Rejected::Uninstalled));
+        assert_eq!(tokens.verify(&token, now()), Err(Rejected::Uninstalled));
     }
 }

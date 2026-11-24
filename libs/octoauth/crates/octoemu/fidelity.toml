@@ -29,6 +29,7 @@
 [routes."GET /app"]
 label = "documented"
 doc = "https://docs.github.com/en/rest/apps/apps#get-the-authenticated-app"
+# `events` sorted, `external_url` the seeded homepage URL (measured).
 
 [routes."GET /app/installations"]
 label = "documented"
@@ -49,8 +50,10 @@ doc = "https://docs.github.com/en/rest/apps/apps#delete-an-installation-for-the-
 [routes."POST /app/installations/{installation_id}/access_tokens"]
 label = "documented"
 doc = "https://docs.github.com/en/rest/apps/apps#create-an-installation-access-token-for-an-app"
-# 201 {token, expires_at, permissions, repository_selection, repositories?};
-# 404 unknown or another App's; 403 suspended; 422 a scope it cannot have.
+# 201 {token, expires_at, permissions (as asked), repository_selection,
+# repositories?}; 404 unknown or another App's; 403 suspended; 422 a scope it
+# cannot have. Errors name the old reference page as documentation_url
+# (measured).
 
 [routes."PUT /app/installations/{installation_id}/suspended"]
 label = "documented"
@@ -75,6 +78,8 @@ doc = "https://docs.github.com/en/rest/apps/installations#list-repositories-acce
 [routes."DELETE /installation/token"]
 label = "documented"
 doc = "https://docs.github.com/en/rest/apps/installations#revoke-an-installation-access-token"
+# 204; the token keeps working elsewhere for a moment
+# (token-revocation-propagation); a second DELETE is 401 Bad credentials.
 
 [routes."GET /user/installations/{installation_id}/repositories"]
 label = "documented"
@@ -113,8 +118,9 @@ doc = "https://docs.github.com/en/rest/using-the-rest-api/getting-started-with-t
 [behaviours.error-body]
 label = "documented"
 doc = "https://docs.github.com/en/rest/using-the-rest-api/troubleshooting-the-rest-api"
-# Errors are {"message", "documentation_url"}. Whether GitHub also sends
-# `status` is still to be measured (plan §3.2).
+# Errors are {"message", "documentation_url"}. GitHub also sends `status`, the
+# HTTP status as a string ("401"; measured 2026-11-24 on every error the
+# fidelity suite records); octoemu leaves it out.
 
 [behaviours.validation-errors]
 label = "documented"
@@ -123,7 +129,7 @@ doc = "https://docs.github.com/en/rest/using-the-rest-api/troubleshooting-the-re
 
 [behaviours.unsupported-api-version]
 label = "assumed"
-reason = "An X-GitHub-Api-Version naming no supported version (2022-11-28, 2026-03-10) is a 400 {\"message\": \"Unsupported API version <value>\"} on every REST route, before the credential is checked; no header means the default version. The docs disagree (the API versions page says 400 for a version no longer supported, the breaking-changes page 410), and the message, the order against authentication and how a malformed value is treated are unmeasured. Scenario api-version-unsupported. Refused in refuse-assumed mode."
+reason = "An X-GitHub-Api-Version naming no supported version (2022-11-28, 2026-03-10) is a 400 {\"message\": \"Bad Request\", \"errors\": \"The version you specified in the \\\"X-GitHub-API-Version\\\" request header, \\\"<value>\\\", is not a supported version. The following versions are currently supported: \\\"2026-03-10\\\" (most recent) and \\\"2022-11-28\\\".\", \"documentation_url\": \"https://docs.github.com/rest\"} on every REST route, before the credential is checked; no header means the default version. The docs disagree (400 on the API versions page, 410 on the breaking-changes page). Measured once against GitHub (2026-11-24, scenario api-version-unsupported): 400 for a version never served, a future one and a malformed one, with and without a credential. Refused in refuse-assumed mode."
 
 [behaviours.rate-limit-headers]
 label = "assumed"
@@ -146,19 +152,21 @@ doc = "https://docs.github.com/en/apps/creating-github-apps/authenticating-with-
 # registered keys; `iss` is the client ID or the App ID (string or number);
 # `iat` required; `exp` required, in the future and at most 10 minutes ahead
 # of the virtual clock. Rejections are 401. A JWT sent with the `token`
-# scheme is refused (the page says Bearer).
+# scheme is refused (the page says Bearer). Measured 2026-11-24
+# (jwt-error-matrix): an `iat` given as a numeric string is accepted, so
+# octoemu reads `iat` and `exp` as a JSON integer or a string of one.
 
 [behaviours.jwt-error-messages]
 label = "assumed"
-reason = "The 401 texts are community-reported, not documented: 'A JSON web token could not be decoded' (malformed, not RS256, bad signature; also a non-JWT on a JWT route), 'Integration not found' (unknown iss), the 'Issued at' claim ('iat') must be an Integer… text (missing, non-integer or future iat), the 'Expiration time' claim ('exp') must be a numeric value… text (missing or expired exp) and 'Expiration time' claim ('exp') is too far in the future. Plan §4 [M] scenario 1 measures them. Replaced by 'octoemu: assumed message withheld' in refuse-assumed mode."
+reason = "The 401 texts are not documented. Measured once against GitHub (2026-11-24, scenarios jwt-error-matrix and jwt-skew-tolerance): 'Bad credentials' for a credential that is not a JWT, alg none, a missing or past exp and an iat 300 s ahead; 'A JSON web token could not be decoded' for a signature no registered key verifies, an installation token on a JWT route and a JWT sent with the token scheme; \"'Issuer' claim ('iss') must be an Integer\" for an iss that is no client ID (and not a number); \"Missing 'issued at' claim ('iat') in assertion\"; \"'Expiration time' claim ('exp') is too far in the future\". Community-reported, unmeasured: 'Integration not found' (a numeric iss naming no App), the 'Issued at' claim ('iat') must be an Integer… text (a non-numeric iat) and the 'Expiration time' claim ('exp') must be a numeric value… text (a non-numeric exp). Replaced by 'octoemu: assumed message withheld' in refuse-assumed mode."
 
 [behaviours.jwt-iat-tolerance]
 label = "assumed"
-reason = "An iat up to 30 s in the future (jwt::IAT_FUTURE_TOLERANCE) is accepted, for a client clock slightly ahead; GitHub's tolerance is unmeasured (plan §4 [M] scenario 1). A JWT accepted only thanks to it is refused in refuse-assumed mode."
+reason = "An iat up to 60 s in the future (jwt::IAT_FUTURE_TOLERANCE) is accepted, for a client clock slightly ahead; more is 401 Bad credentials. Measured once against GitHub (2026-11-24, scenario jwt-skew-tolerance): an iat 0, 10, 25, 45 and 60 s ahead of GitHub's Date was accepted, 300 s ahead refused; 60 s is the strictest bound that allows. A JWT accepted only thanks to it is refused in refuse-assumed mode."
 
 [behaviours.jwt-exp-after-iat]
 label = "assumed"
-reason = "exp more than 600 s after iat is rejected even when it is within 10 minutes of now (community-reported; the docs only bound exp against the current time). Refused in refuse-assumed mode when it is the only reason to reject."
+reason = "exp is bounded by the current time only, not by iat: an exp more than 600 s after iat is accepted while it is within 10 minutes of now. Measured once against GitHub (2026-11-24, scenario jwt-error-matrix: iat 120 s back, exp 540 s ahead, accepted), contradicting the community report that GitHub rejects it. A JWT accepted although exp is more than 600 s after iat is refused in refuse-assumed mode."
 
 [behaviours.bad-credentials]
 label = "documented"
@@ -174,7 +182,7 @@ doc = "https://docs.github.com/en/rest/apps/installations#list-repositories-acce
 
 [behaviours.wrong-credential-kind]
 label = "assumed"
-reason = "A credential of the wrong kind (an installation token on a JWT route, a JWT on an installation-token route) is a 401, with 'A JSON web token could not be decoded' on JWT routes and 'Bad credentials' elsewhere. GitHub may answer some such calls with a 403 ('You must authenticate with an installation access token…'); unmeasured. Refused in refuse-assumed mode."
+reason = "A credential of the wrong kind (an installation token on a JWT route, a JWT on an installation-token route) is a 401, with 'A JSON web token could not be decoded' on JWT routes and 'Bad credentials' elsewhere. Measured once against GitHub (2026-11-24, scenario jwt-error-matrix) for GET /app and GET /repos/{owner}/{repo}; other routes might answer 403 ('You must authenticate with an installation access token…'), unmeasured. Refused in refuse-assumed mode."
 
 [behaviours.permission-enforcement]
 label = "documented"
@@ -200,19 +208,21 @@ doc = "https://docs.github.com/en/apps/creating-github-apps/authenticating-with-
 
 [behaviours.installation-token-format]
 label = "assumed"
-reason = "ghs_<APPID>_<JWT>, about 520 characters, follows GitHub's stateless-token rollout (https://github.blog/changelog/2026-10-02-stateless-github-app-installation-tokens-rolled-out/); the inner JWT (HS256 with a per-instance key; claims iss, sub, aud, app_id, installation_id, jti, iat, nbf, exp, pad) is octoemu's own. Informational: clients must treat tokens as opaque, so nothing is refused for it."
+reason = "ghs_<APPID>_<JWT>, 383 characters, follows GitHub's stateless-token rollout (https://github.blog/changelog/2026-10-02-stateless-github-app-installation-tokens-rolled-out/). Measured against GitHub (2026-11-24, scenario token-revocation-delete): the prefix, the App ID as the second segment, a JWT after it and 383 characters on every token minted that day (the changelog's 'about 520' did not hold). The inner JWT (HS256 with a per-instance key; claims iss, app_id, installation_id, jti, iat, exp, pad) is octoemu's own. Informational: clients must treat tokens as opaque, so nothing is refused for it."
 
 [behaviours.installation-token-scope]
 label = "documented"
 doc = "https://docs.github.com/en/rest/apps/apps#create-an-installation-access-token-for-an-app"
 # `permissions` narrows and never widens; `repositories` (names) and
 # `repository_ids` narrow to repositories the installation can access, at
-# most 500; the response has permissions, repository_selection and, when
-# narrowed, repositories. Tokens are looked up on every call.
+# most 500 (each is checked first: measured, 501 unknown IDs are refused as
+# inaccessible); the response has permissions (exactly those asked, measured),
+# repository_selection and, when narrowed, repositories. Tokens are looked up
+# on every call.
 
 [behaviours.token-error-messages]
 label = "assumed"
-reason = "The 422 texts for a scope a token cannot have are community-reported or invented: 'The permissions requested are not granted to this installation.' (an ungranted permission, a higher level, an unknown level), 'There is at least one repository that does not exist or is not accessible to the parent installation.' (an unknown repository) and a Validation Failed with a custom error for over 500 repositories. Plan §4 [M] scenario 2. Withheld in refuse-assumed mode."
+reason = "The 422 texts for a scope a token cannot have are not documented. Measured once against GitHub (2026-11-24, scenario token-downscoping-errors): 'The permissions requested are not granted to this installation.' (a permission the installation lacks), 'The level of access for permissions requested are not granted to this installation.' (a higher level, a level the permission does not have) and 'There is at least one repository that does not exist or is not accessible to the parent installation.' (an unknown repository, 501 unknown repository IDs). Invented: a Validation Failed with a custom error for over 500 accessible repositories. Withheld in refuse-assumed mode."
 
 [behaviours.token-repositories-union]
 label = "assumed"
@@ -220,19 +230,27 @@ reason = "With both repositories and repository_ids, the token covers the union 
 
 [behaviours.token-implicit-metadata]
 label = "assumed"
-reason = "A token narrowed by permissions that omit metadata still gets metadata: read when the installation has it (GitHub adds it to repository-scoped tokens). Refused in refuse-assumed mode when it applies."
+reason = "A token narrowed by permissions that omit metadata still holds metadata: read when the installation has it, so it can read the repositories it covers. Unmeasured; measured once against GitHub (2026-11-24, scenario token-downscoping-errors): the answer lists only the permissions asked ({members: read} answers {members: read}), and so does octoemu's. Refused in refuse-assumed mode when it applies."
 
 [behaviours.token-revocation-immediate]
 label = "assumed"
-reason = "A revoked token (DELETE /installation/token) or one of an uninstalled installation is refused (401 Bad credentials) on its next use. Whether GitHub rejects stateless tokens immediately is unmeasured (plan §4 [M] scenario 3). Refused in refuse-assumed mode."
+reason = "A token of an uninstalled installation (DELETE /app/installations/{installation_id}, or the admin uninstall) is refused (401 Bad credentials) on its next use. Whether GitHub rejects stateless tokens at once after an uninstall is unmeasured (plan §4 [M] scenario 3; scenario token-revocation-uninstall is destructive). Refused in refuse-assumed mode."
+
+[behaviours.token-revocation-propagation]
+label = "assumed"
+reason = "A token revoked with DELETE /installation/token keeps working on every other route for 500 ms on the virtual clock (tokens::REVOCATION_PROPAGATION), then is 401 Bad credentials; a second DELETE /installation/token is 401 Bad credentials at once. Measured against GitHub (2026-11-24, scenario token-revocation-delete and two ad-hoc runs of it): a second DELETE was always 401 at once; of eight uses right after the DELETE, two were accepted (the later 0.41 s after it) and six refused (the earliest 0.11 s after it), and every use from 0.78 s on was refused. So revocation propagates within about a second, not at once; octoemu models the window GitHub may leave open. Refused in refuse-assumed mode: a revoked token's use answers the refusal."
+
+[behaviours.token-narrowed-selection]
+label = "assumed"
+reason = "A token minted with permissions reports repository_selection: selected, whatever the installation's selection. Measured once against GitHub (2026-11-24, scenario token-downscoping-errors, {permissions: {members: read}} on an all-repositories installation); whether it depends on the permissions asked is unmeasured. GET /installation/repositories still reports the installation's selection for such a token. Left out of the answer in refuse-assumed mode."
 
 [behaviours.suspended-installation]
 label = "assumed"
-reason = "Token creation for a suspended installation is the endpoint's documented 403; the message 'This installation has been suspended' is community-reported (plan §4 [M] scenario 4). Withheld in refuse-assumed mode."
+reason = "Token creation for a suspended installation is the endpoint's documented 403; the message 'This installation has been suspended' is undocumented. Measured once against GitHub (2026-11-24, scenario suspended-installation): that message; suspending twice is 204 both times; GET /app/installations/{installation_id} shows suspended_at and suspended_by (the App's bot when it suspended itself), null again after unsuspending. Withheld in refuse-assumed mode."
 
 [behaviours.suspended-installation-tokens]
 label = "assumed"
-reason = "Tokens minted before a suspension are refused while it lasts, with the same 403 and message as token creation, and work again after unsuspension. GitHub documents that access is blocked; status, message and timing are unmeasured (plan §4 [M] scenarios 3-4). Refused in refuse-assumed mode."
+reason = "Tokens minted before a suspension are refused while it lasts, with 403 'This GitHub App installation is currently suspended.' (not token creation's text), and work again after unsuspension. GitHub documents that access is blocked; measured once against GitHub (2026-11-24, scenario suspended-installation): the status, the message and both changes on the very next call. Refused in refuse-assumed mode."
 
 [behaviours.pagination]
 label = "documented"
@@ -300,7 +318,8 @@ doc = "https://docs.github.com/en/rest/collaborators/invitations#delete-a-reposi
 [routes."GET /users/{username}"]
 label = "documented"
 doc = "https://docs.github.com/en/rest/users/users#get-a-user"
-# Public (any valid credential or none). Users and organizations.
+# Public (any valid credential or none). Users, organizations and App bots
+# ({slug}[bot], app-bot-account).
 
 [routes."GET /user/{account_id}"]
 label = "assumed"
@@ -361,7 +380,7 @@ doc = "https://docs.github.com/en/webhooks/webhook-events-and-payloads#member"
 
 [behaviours.member-edited-changes]
 label = "assumed"
-reason = "member.edited carries changes {old_permission: {from}, permission: {from, to}} with role names; the shape is unmeasured (plan §4 [M] scenario 14). Left out of the payload in refuse-assumed mode."
+reason = "member.edited carries changes {permission: {from, to}} with role names (read, write, …), no old_permission. Measured once against GitHub (2026-11-24, scenario member-edited-changes, read to write through the deliveries API). Left out of the payload in refuse-assumed mode."
 
 [behaviours.member-added-directly]
 label = "assumed"
@@ -369,7 +388,7 @@ reason = "An organization member added by PUT …/collaborators/{username} (204,
 
 [behaviours.reput-pending-invitation]
 label = "assumed"
-reason = "PUT …/collaborators/{username} for a user with a pending invitation answers 201 with that same invitation (same ID and created_at) and sets its permissions to the requested role; it does not count against the 50-per-day limit. Unmeasured (SP-07, plan §4 [M] scenario 8). Refused in refuse-assumed mode."
+reason = "PUT …/collaborators/{username} for a user with a pending invitation answers 201 with that same invitation (same ID and created_at) and keeps its permissions whatever the PUT asks (PATCH the invitation to change them); it does not count against the 50-per-day limit. Measured once against GitHub (2026-11-24, scenario reput-pending-invitation: invited read, re-PUT read then write, the reply and both invitation lists say read; one invitation, cancelled by its first ID); the limit is unmeasured. Refused in refuse-assumed mode."
 
 [behaviours.reput-expired-invitation]
 label = "assumed"
@@ -438,7 +457,7 @@ reason = "The 422 bodies of the repository routes are guesses: Validation Failed
 
 [behaviours.app-bot-account]
 label = "assumed"
-reason = "What an installation token does is attributed to the App's bot account: login {slug}[bot], type Bot, ID 1000000000 + the App ID (octoemu's own; GitHub's bot IDs are unrelated numbers). It is the inviter of invitations and the sender of member events the App causes. Informational: nothing is refused for it."
+reason = "What an installation token does is attributed to the App's bot account: login {slug}[bot], type Bot, ID 1000000000 + the App ID (octoemu's own; GitHub's bot IDs are unrelated numbers), html_url the App's page, URLs with the brackets percent-encoded (/users/{slug}%5Bbot%5D). It is the inviter of invitations, the sender of member events the App causes and suspended_by when the App suspends its installation, and GET /users/{slug}[bot] answers it with the same ID. Measured once against GitHub (2026-11-24, scenarios reput-pending-invitation, member-edited-changes, suspended-installation): the shape, the encoding, and one ID across all of them and GET /users. Informational: nothing is refused for it."
 
 # --- Webhooks (GE-04) ---------------------------------------------------------
 
@@ -677,19 +696,20 @@ label = "documented"
 doc = "https://docs.github.com/en/apps/oauth-apps/maintaining-oauth-apps/troubleshooting-oauth-app-access-token-request-errors"
 # incorrect_client_credentials, redirect_uri_mismatch, bad_verification_code,
 # unverified_user_email (the user's primary address is unverified) with the
-# page's error_description and error_uri.
+# page's error_description and an absolute error_uri on docs.github.com
+# (measured 2026-11-24, oauth-exchange-errors).
 
 [behaviours.oauth-error-status]
 label = "assumed"
-reason = "Token-endpoint errors are answered with HTTP 200 and the error in the body (community-reported; plan §4 [M] scenario 5). Refused in refuse-assumed mode."
+reason = "Token-endpoint errors are answered with HTTP 200 and the error in the body; a client_id naming no App is a 404 with {\"error\": \"Not Found\"}. Measured against GitHub (2026-11-24, scenario oauth-exchange-errors, twice): 200 for a bad code (JSON and form-encoded), a wrong secret, a bad refresh token and an unknown grant type; 404 for an unknown client. Refused in refuse-assumed mode."
 
 [behaviours.bad-refresh-token-text]
 label = "assumed"
-reason = "bad_refresh_token's error_description 'The refresh token passed is incorrect or expired.' and its error_uri are not documented. Withheld in refuse-assumed mode."
+reason = "bad_refresh_token's error_description 'The refresh token passed is incorrect or expired.' and its error_uri (the bad code's anchor, #bad-verification-code) are not documented. Measured once against GitHub (2026-11-24, scenario oauth-exchange-errors). Withheld in refuse-assumed mode."
 
 [behaviours.unsupported-grant-type]
 label = "assumed"
-reason = "A grant_type other than authorization_code or refresh_token is unsupported_grant_type ('The grant type is not supported.'). Refused in refuse-assumed mode."
+reason = "A grant_type other than refresh_token is read as the code grant: with a bad code it is bad_verification_code, not unsupported_grant_type. Measured against GitHub (2026-11-24, scenario oauth-exchange-errors, twice: grant_type=password with a bad code); what a good code does with an unknown grant type is unmeasured. Refused in refuse-assumed mode for a grant_type other than authorization_code and refresh_token."
 
 [behaviours.refresh-token-rotation]
 label = "documented"
@@ -860,9 +880,9 @@ doc = "https://docs.github.com/en/rest/orgs/members#get-an-organization-membersh
 label = "documented"
 doc = "https://docs.github.com/en/rest/orgs/members#update-an-organization-membership-for-the-authenticated-user"
 # User token, members: write (a ghu_ token's App). {"state": "active"} (else
-# 422) accepts: 200 with the active membership; organization.member_added.
-# GitHub may answer 202 when it processes the change asynchronously: not
-# modelled (always 200). 404 without a pending membership or invitation.
+# 422) accepts: 202 with the membership, already active (measured 2026-11-24,
+# org-membership-accept, twice; the docs say 200); organization.member_added.
+# 404 without a pending membership or invitation.
 
 [behaviours.org-membership-pending]
 label = "documented"
@@ -1011,11 +1031,12 @@ token-downscoping-errors = [
     "token-error-messages",
     "token-repositories-union",
     "token-implicit-metadata",
+    "token-narrowed-selection",
 ]
 token-revocation-delete = [
     "DELETE /installation/token",
     "installation-token-format",
-    "token-revocation-immediate",
+    "token-revocation-propagation",
     "bad-credentials",
 ]
 token-revocation-uninstall = [
@@ -1028,6 +1049,7 @@ suspended-installation = [
     "GET /app/installations/{installation_id}",
     "suspended-installation",
     "suspended-installation-tokens",
+    "app-bot-account",
 ]
 oauth-exchange-errors = [
     "POST /login/oauth/access_token",
@@ -1044,6 +1066,7 @@ reput-pending-invitation = [
     "GET /user/repository_invitations",
     "collaborator-put-outcomes",
     "reput-pending-invitation",
+    "app-bot-account",
 ]
 expired-invitation = [
     "invitation-expiry",

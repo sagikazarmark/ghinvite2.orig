@@ -36,7 +36,9 @@ invitation-expiry routes (GE-09b), the admin organization rename
 the fidelity suite's emulator half (GE-08: [`octoemu-conformance`](#fidelity-suite-octoemu-conformance),
 which also brought `DELETE /app/installations/{installation_id}`, the
 `X-GitHub-Api-Version` check, the outside-collaborator policy and
-schema-complete user, organization, team and repository objects). The temporary stub-compatibility shim
+schema-complete user, organization, team and repository objects), and
+its live half (GE-08: the first live record run against GitHub, and
+octoemu changed to answer as GitHub did). The temporary stub-compatibility shim
 of GE-07 is gone (GE-09c): ghinvite's suites build their world from the
 native seed and admin API (`ghinvite_e2e::github`).
 
@@ -48,7 +50,7 @@ native seed and admin API (`ghinvite_e2e::github`).
 | `GET /app/installations` | App JWT | Paged |
 | `GET /app/installations/{installation_id}` | App JWT | 404 for an unknown installation or another App's |
 | `DELETE /app/installations/{installation_id}` | App JWT | The App uninstalls itself: 204, `installation.deleted` sent by its bot, its tokens stop working; 404 for an unknown installation or another App's |
-| `POST /app/installations/{installation_id}/access_tokens` | App JWT | 201 `{token, expires_at, permissions, repository_selection, repositories?}`; body `permissions`, `repositories`, `repository_ids` narrow |
+| `POST /app/installations/{installation_id}/access_tokens` | App JWT | 201 `{token, expires_at, permissions, repository_selection, repositories?}`; body `permissions`, `repositories`, `repository_ids` narrow (`permissions` answers exactly what was asked) |
 | `PUT`/`DELETE /app/installations/{installation_id}/suspended` | App JWT | 204 |
 | `GET /app/installation-requests` | App JWT | Paged |
 | `GET /app/hook/config` | App JWT | `{url, content_type: "json", secret: "********", insecure_ssl}`; 404 without a webhook |
@@ -57,18 +59,18 @@ native seed and admin API (`ghinvite_e2e::github`).
 | `GET /app/hook/deliveries/{delivery_id}` | App JWT | With `url`, `request {headers, payload}`, `response {headers, payload}`; 404 for another App's |
 | `POST /app/hook/deliveries/{delivery_id}/attempts` | App JWT | 202 `{}`; the same body and GUID again, `redelivery: true` |
 | `GET /installation/repositories` | installation token, `metadata: read` | Paged; only the token's repositories |
-| `DELETE /installation/token` | installation token | 204; the token stops working |
+| `DELETE /installation/token` | installation token | 204; the token stops working on other routes 500 ms later (on the virtual clock); a second `DELETE` is 401 at once |
 | `GET /user/installations/{installation_id}/repositories` | a GitHub App's user access token | Paged `{total_count, repository_selection, repositories}`: the installation's repositories the user has explicit access to, each with the user's `permissions`; 404 for another App's installation or one the user reaches nothing of (assumed: an empty list for the account's owner, 404 while suspended, 403 for a classic PAT) |
 | `GET /repos/{owner}/{repo}` | installation or user token, `metadata: read` | Private and internal repositories outside the token's reach are 404 |
 | `GET /repos/{owner}/{repo}/collaborators` | installation token, `metadata: read` | Paged; `affiliation=direct\|outside\|all` (default all); each with `permissions` and `role_name` |
-| `PUT /repos/{owner}/{repo}/collaborators/{username}` | installation token, `administration: write` | Body `{permission}` (`pull`, `triage`, `push` (default), `maintain`, `admin` or a custom role); 201 with the invitation, 204 for a user with access (a role change, an organization member added directly); 422 for another value or past 50 invitations per 24 h; 403 `Inviting outside collaborators is restricted by organization policy.` for a non-member of an organization seeded `outside_collaborators_restricted` (assumed) |
+| `PUT /repos/{owner}/{repo}/collaborators/{username}` | installation token, `administration: write` | Body `{permission}` (`pull`, `triage`, `push` (default), `maintain`, `admin` or a custom role); 201 with the invitation (a pending one again, its role unchanged), 204 for a user with access (a role change, an organization member added directly); 422 for another value or past 50 invitations per 24 h; 403 `Inviting outside collaborators is restricted by organization policy.` for a non-member of an organization seeded `outside_collaborators_restricted` (assumed) |
 | `DELETE /repos/{owner}/{repo}/collaborators/{username}` | installation token, `administration: write` | 204 |
 | `GET /repos/{owner}/{repo}/collaborators/{username}/permission` | installation token, `metadata: read` | `permission` (`admin\|write\|read\|none`), `role_name` (exact, custom included), `user`; the highest role across sources |
 | `GET /repos/{owner}/{repo}/invitations` | installation token, `administration: read` | Paged; `Link` URLs on the alias below |
 | `GET /repositories/{repository_id}/invitations` | installation token, `administration: read` | The same list by repository ID |
 | `PATCH /repos/{owner}/{repo}/invitations/{invitation_id}` | installation token, `administration: write` | Body `{permissions}` (`read`, `write`, `triage`, `maintain`, `admin`); 200 with the invitation |
 | `DELETE /repos/{owner}/{repo}/invitations/{invitation_id}` | installation token, `administration: write` | 204 |
-| `GET /users/{username}` | none needed | Users and organizations |
+| `GET /users/{username}` | none needed | Users, organizations and App bots (`{slug}[bot]`) |
 | `GET /user/{account_id}` | none needed | The same by numeric ID |
 | `GET /avatars/u/{id}` | none needed | A small PNG for any seeded account or App bot |
 | `GET /user` | user token | The signed-in user (`id`, `login`, `avatar_url`, `created_at`, `type`, `name`, `email`, …); `email` is the public primary address, else null |
@@ -93,7 +95,7 @@ native seed and admin API (`ghinvite_e2e::github`).
 | `DELETE /orgs/{org}/teams/{team_slug}/memberships/{username}` | installation token, `members: write` | 204 (`membership.removed`) |
 | `GET /user/memberships/orgs` | user token | Paged; `state=active\|pending` |
 | `GET /user/memberships/orgs/{org}` | user token, `members: read` | 200 or 404 |
-| `PATCH /user/memberships/orgs/{org}` | user token, `members: write` | `{"state": "active"}`: accepts; 200 (GitHub's asynchronous 202 is not modelled) |
+| `PATCH /user/memberships/orgs/{org}` | user token, `members: write` | `{"state": "active"}`: accepts; 202 with the membership, already active (as GitHub answers; its docs say 200) |
 | `POST /applications/{client_id}/token` | `Basic client_id:client_secret` | Check `{access_token}`: 200 with the authorization, 404 invalid, 422 without `access_token` |
 | `PATCH /applications/{client_id}/token` | `Basic …` | Reset: 200 with a new token; the old one stops working |
 | `DELETE /applications/{client_id}/token` | `Basic …` | Revoke: 204 (and its refresh token) |
@@ -132,7 +134,12 @@ outside ghinvite's surface stays 501.
   A repository gets at most 50 invitations per sliding 24 hours through
   the API.
 - **What the App does** is attributed to its bot account
-  (`{slug}[bot]`, `type: "Bot"`, ID 1 000 000 000 + App ID).
+  (`{slug}[bot]`, `type: "Bot"`, ID 1 000 000 000 + App ID, URLs with the
+  brackets percent-encoded as GitHub writes them, `/users/{slug}%5Bbot%5D`;
+  `GET /users/{slug}[bot]` answers it).
+- **Settings.** A repository's `has_wiki`, `has_downloads` and
+  `allow_forking` are seeded (`Repo::has_wiki` and the like); true, the
+  REST API's defaults for a new repository, when absent.
 - **The invitee's side** (accept, decline, leave) are domain operations
   (`src/collaboration.rs`), reached through the user-token routes
   (`/user/repository_invitations…`) and the admin API's `act` routes alike.
@@ -202,11 +209,13 @@ point a client's GitHub web origin at `web_base` and its API base at
   `expires_in` 28800, `refresh_token` (`ghr_` + 76),
   `refresh_token_expires_in` 15897600; then `scope` `""` and `token_type`
   `bearer`. A refresh token works once and kills the access token it came
-  with. Errors (`incorrect_client_credentials`, `redirect_uri_mismatch`,
-  `bad_verification_code`, `bad_refresh_token`, `unverified_user_email` for
-  an unverified primary address, `unsupported_grant_type`) carry GitHub's
-  documented `error_description` and `error_uri`, with HTTP 200 (assumed;
-  refused in refuse-assumed mode).
+  with. Errors (`incorrect_client_credentials` for a wrong secret,
+  `redirect_uri_mismatch`, `bad_verification_code`, `bad_refresh_token`,
+  `unverified_user_email` for an unverified primary address) carry
+  GitHub's `error_description` and an absolute `error_uri`, with HTTP 200;
+  a `client_id` naming no App is a 404 `{"error": "Not Found"}`, and any
+  `grant_type` but `refresh_token` is read as the code grant (as GitHub
+  answers; assumed, refused in refuse-assumed mode).
 - **User tokens** are looked up on every call: unknown, expired, revoked:
   401 `Bad credentials`. A `ghu_` token holds its App's `user_permissions`
   and `permissions`; on resource routes it reaches only what the user can
@@ -233,7 +242,8 @@ outbox: `{"id", "at", "event", "action", "targets": [{"app_id",
   `team`). Targets: the organization's non-suspended installations
   subscribed to the event; `organization` and `sender` in every payload.
 - `member` `added` (an invitation accepted, or an organization member
-  added directly), `edited` (a role change, with `changes`) and `removed`
+  added directly), `edited` (a role change, with `changes: {permission:
+  {from, to}}`) and `removed`
   (`DELETE …/collaborators/{username}` or leaving). Targets: the
   non-suspended installations that can access the repository and
   subscribe to `member`. The payload leaves out `installation`, which
@@ -298,17 +308,22 @@ is checked before the handler runs, in this order:
    - **App JWT** (`Authorization: Bearer <jwt>`): RS256, verified against
      any of the App's `public_keys` (so a rotation can list old and new);
      `iss` the client ID or the App ID (string or number); `iat` an integer
-     at most 30 s in the future; `exp` an integer, in the future, at most
-     600 s after the virtual clock's now and after `iat`. Rejections carry
-     GitHub's community-reported messages (`A JSON web token could not be
-     decoded`, `Integration not found`, the `'Issued at' claim ('iat')…` and
-     `'Expiration time' claim ('exp')…` texts). A JWT sent as `token <jwt>`
-     is refused. octoauth's skew correction works: the emulator's `Date`
-     tells it how far off it is.
+     (or a string of one) at most 60 s in the future; `exp` the same, in
+     the future, at most 600 s after the virtual clock's now (not bounded
+     by `iat`). Rejections carry GitHub's messages as the fidelity suite
+     measured them (`Bad credentials` for a malformed or `alg: none` JWT,
+     a missing or past `exp` and a future `iat`; `A JSON web token could
+     not be decoded` for a bad signature; `'Issuer' claim ('iss') must be
+     an Integer`; `Missing 'issued at' claim ('iat') in assertion`;
+     `'Expiration time' claim ('exp') is too far in the future`). A JWT
+     sent as `token <jwt>` is refused. octoauth's skew correction works:
+     the emulator's `Date` tells it how far off it is.
    - **Installation token** (`Bearer ghs_…` or `token ghs_…`): looked up on
      every call. Unknown, forged, expired (1 h, on the virtual clock),
-     revoked or uninstalled: 401 `Bad credentials`. Suspended: 403 `This
-     installation has been suspended`, until unsuspended.
+     uninstalled, or revoked more than 500 ms ago on the virtual clock
+     (GitHub's revocation takes a moment to propagate): 401 `Bad
+     credentials`. Suspended: 403 `This GitHub App installation is
+     currently suspended.`, until unsuspended.
    - **User token** (`Bearer ghu_…`/`ghp_…`, or `token …`): looked up on
      every call; unknown, expired or revoked: 401 `Bad credentials`.
    - **Client credentials** (`Basic base64(client_id:client_secret)`): a
@@ -322,14 +337,16 @@ is checked before the handler runs, in this order:
    `X-Accepted-GitHub-Permissions: <permission>=<level>`.
 
 **Installation tokens** are GitHub's stateless format, `ghs_<APPID>_<JWT>`,
-about 520 characters, signed with a key drawn per instance (the inner
+383 characters like GitHub's, signed with a key drawn per instance (the inner
 claims are octoemu's own; treat tokens as opaque). A token's scope is the
 installation's grant (its `permissions`, else the App's; its repository
 selection) narrowed by the request:
 
 - `permissions` may only ask for granted permissions at granted levels or
   lower; anything else is 422. A token narrowed without `metadata` keeps
-  `metadata: read` when the installation has it.
+  `metadata: read` when the installation has it (the answer lists only
+  what was asked). A token narrowed by `permissions` reports
+  `repository_selection: "selected"`.
 - `repositories` (names) and `repository_ids` narrow to repositories the
   installation can access, 500 at most; an unknown one is 422; both
   together cover the union. A narrowed token reports
@@ -543,9 +560,9 @@ are paged GitHub's way: `per_page` (default 30, silently capped at 100),
 `page`, and a `Link` header with `prev`, `next`, `last` and `first`. Errors use GitHub's
 `{"message", "documentation_url"}`; 422s add `errors[{resource, field, code}]`.
 An `X-GitHub-Api-Version` other than `2022-11-28` or `2026-03-10` is a 400
-`Unsupported API version <value>` on every REST route, before the
-credential (assumed: the docs disagree on 400 or 410); without the header
-the default version applies. Users, organizations, teams and repositories
+`Bad Request` whose `errors` names the value and the supported versions, on
+every REST route, before the credential (as GitHub answers; the docs
+disagree on 400 or 410); without the header the default version applies. Users, organizations, teams and repositories
 carry every field their OpenAPI schema requires (`simple-user`'s and
 `organization-simple`'s URL templates, a repository's `*_url` templates,
 clone URLs, zeroed counts and `has_*` flags, a team's `type`), checked by
@@ -652,15 +669,22 @@ the request ID) are left out, and an error whose status is documented but
 whose text is a guess keeps its status with the message
 `octoemu: assumed message withheld`.
 
+The first live run of the fidelity suite (2026-11-24) measured many of
+the `assumed` entries; their reasons now say what GitHub answered, and
+where it contradicted the guess, octoemu was changed to match. They stay
+`assumed` until a live run stamps them `verified` (GE-10).
+
 `assumed` today: `jwt-error-messages`, `jwt-iat-tolerance`,
 `jwt-exp-after-iat`, `wrong-credential-kind`, `installation-token-format`,
 `token-error-messages`, `token-repositories-union`,
-`token-implicit-metadata`, `token-revocation-immediate`,
+`token-implicit-metadata`, `token-narrowed-selection` (left out),
+`token-revocation-propagation`, `token-revocation-immediate` (an
+uninstall),
 `suspended-installation`, `suspended-installation-tokens`,
 `rate-limit-headers`, `request-id-header`, `unsupported-api-version`
 (refused), `secondary-rate-limit` (a label: no secondary limit is
 modelled); and for repositories
-`reput-pending-invitation` (201 with the same invitation, role updated),
+`reput-pending-invitation` (201 with the same invitation, role kept),
 `reput-expired-invitation` (replaced by a new one),
 `expired-invitations-listed`, `accept-expired-invitation` (refused),
 `invitation-alias-links`, `custom-role-invitation-permissions`,
@@ -706,11 +730,13 @@ octoemu or against real GitHub (plan §4, GE-08).
 
 - **Scenarios** use public GitHub routes only. On the emulator each starts
   from a fresh instance seeded with the fidelity world (an organization,
-  a repository, a team, the fidelity App installed with
+  a private repository with the live one's settings (no wiki, downloads or
+  forking), a team, the fidelity App installed with
   `administration: write`, `members: write`, `metadata: read` and the
-  `member`/`organization`/`membership` events, an invitee outside the
-  organization with a PAT, a sign-in App, an organization that keeps
-  outside collaborators to owners, a paid one with every seat filled).
+  `member`/`organization`/`membership` events and the homepage URL the
+  setup guide registers, an invitee outside the organization with a PAT, a
+  sign-in App, an organization that keeps outside collaborators to owners,
+  a paid one with every seat filled).
   Seeding is setup and may use the admin API; the one admin call a step
   makes is the clock.
 - **Snapshots** (`snapshots/<scenario>.json`): each step's request line,
@@ -718,14 +744,18 @@ octoemu or against real GitHub (plan §4, GE-08).
   `retry-after`, `x-accepted-github-permissions`, `x-github-sso`,
   `x-ratelimit-remaining`, `x-ratelimit-resource`) and the body,
   normalised (IDs, timestamps, tokens, GUIDs, origins and the world's
-  names become placeholders; profile fields and counts become
-  `<varies>`). Compare mode checks a run against them, ignoring field
-  order; fields one side lacks are listed (on the emulator: unmodelled),
-  not failures. **Today every snapshot says `"source": "emulator
-  (unverified)"`**: they were generated from octoemu. The first live run
-  in record mode overwrites them, and the diff it shows is the fidelity
-  signal; from then on the emulator run is compared with GitHub's answers,
-  and an emulator record run never overwrites a live snapshot. The live
+  names become placeholders; profile fields and counts, the App's
+  `installations_count` among them, become `<varies>`). Compare mode
+  checks a run against them, ignoring field order; fields one side lacks
+  are listed (on the emulator: unmodelled), not failures. The first
+  snapshots were generated from octoemu (`"source": "emulator
+  (unverified)"`). **The first live record run (2026-11-24, a throwaway
+  Free organization) replaced 11 of them with GitHub's answers
+  (`"source": "live"`)**; the 9 it skipped (destructive, slow, or needing
+  an optional extra: a consent-screen token, a policy or a full paid
+  organization) are still the emulator's. The emulator run is compared
+  with GitHub's answers, and an emulator record run never overwrites a
+  live snapshot. The live
   target pointed at another endpoint (`OCTOEMU_LIVE_API_BASE`, e.g. an
   `octoemu` binary for a smoke test) records `"source": "custom endpoint
   (not GitHub)"` and never overwrites a live snapshot either.
@@ -755,7 +785,7 @@ octoemu or against real GitHub (plan §4, GE-08).
 | `jwt-error-matrix` | App JWT rejections and their messages | runs |
 | `jwt-skew-tolerance` | how far ahead `iat` and `exp` may be | runs |
 | `token-downscoping-errors` | narrowing an installation token | runs |
-| `token-revocation-delete` | the token's shape, `DELETE /installation/token` | runs |
+| `token-revocation-delete` | the token's shape, how soon `DELETE /installation/token` takes effect | runs |
 | `token-revocation-uninstall` | tokens after the App uninstalls itself | destructive (reinstall by hand) |
 | `suspended-installation` | suspend and unsuspend, tokens, minting | runs (always unsuspends) |
 | `oauth-exchange-errors` | token endpoint errors: status and body | runs |
@@ -765,7 +795,7 @@ octoemu or against real GitHub (plan §4, GE-08).
 | `repo-invitation-limit` | 50 invitations per repository per day | destructive |
 | `outside-collaborator-policy` | PUT for a non-member under the owner-only policy | needs the policy organization, else skipped |
 | `member-edited-changes` | the `member.edited` payload's `changes` (via the deliveries API) | runs |
-| `org-membership-accept` | pending, accept (200 or 202), active | runs |
+| `org-membership-accept` | pending, accept (202), active | runs |
 | `org-invitation-limit` | the organization invitation budget | destructive |
 | `org-spammed` | the `spammed` body | emulator only (GitHub decides; skipped live) |
 | `org-no-seat` | no seat left | needs a full paid organization, else skipped |

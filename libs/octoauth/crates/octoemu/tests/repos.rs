@@ -281,12 +281,12 @@ async fn put_creates_an_invitation_then_answers_204() {
     let created_at: DateTime<Utc> = invitation["created_at"].as_str().unwrap().parse().unwrap();
     assert!(created_at >= start_2030());
 
-    // Re-PUT on the pending invitation: the same invitation, new role
-    // (assumed).
+    // Re-PUT on the pending invitation: the same invitation, its role
+    // unchanged (as GitHub answers).
     let again = world.invite("widgets", "hubot", "admin").await;
     assert_eq!(again.status, StatusCode::CREATED);
     assert_eq!(again.body["id"], id);
-    assert_eq!(again.body["permissions"], "admin");
+    assert_eq!(again.body["permissions"], "triage");
     assert_eq!(again.body["created_at"], invitation["created_at"]);
 
     // An existing collaborator: 204, and a role change is 204 too.
@@ -307,7 +307,7 @@ async fn put_creates_an_invitation_then_answers_204() {
     assert_eq!(events[0].payload["member"]["login"], "monalisa");
     assert_eq!(
         events[0].payload["changes"],
-        json!({"old_permission": {"from": "write"}, "permission": {"from": "write", "to": "maintain"}})
+        json!({"permission": {"from": "write", "to": "maintain"}})
     );
     assert_eq!(events[0].payload["sender"]["login"], "invite-bot[bot]");
 

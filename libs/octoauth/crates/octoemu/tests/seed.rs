@@ -229,6 +229,11 @@ fn reports_installation_request_and_suspension_problems() {
         .org(Org::new(2, "acme"))
         .app(app(5))
         .installation(Installation::new(6, 5, "acme").suspended_by("acme"))
+        .installation({
+            let mut by_app = Installation::new(8, 5, "octocat").suspended_by("octocat");
+            by_app.suspended_by_app_id = Some(9);
+            by_app
+        })
         .installation_request(InstallationRequest::new(7, 9, "nobody", "acme"))
         .installation_request(InstallationRequest::new(7, 5, "acme", "octocat"));
     assert_eq!(
@@ -236,6 +241,9 @@ fn reports_installation_request_and_suspension_problems() {
         [
             "installations[0].suspended_by: only a suspended installation (with suspended_at) names who suspended it",
             "installations[0].suspended_by: \"acme\" is an organization, not a user",
+            "installations[1].suspended_by: only a suspended installation (with suspended_at) names who suspended it",
+            "installations[1].suspended_by_app_id: only a suspended installation names who suspended it, a user or an App",
+            "installations[1].suspended_by_app_id: no App with ID 9",
             "installation_requests[0].app_id: no App with ID 9",
             "installation_requests[0].account: no user or organization \"nobody\"",
             "installation_requests[0].requester: \"acme\" is an organization, not a user",

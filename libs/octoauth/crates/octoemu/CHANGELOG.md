@@ -191,6 +191,56 @@ compat`, `/__octoemu/compat/`) was never released and is gone (GE-09c).
 
 ### Changed
 
+- Answers as GitHub did in the fidelity suite's first live run
+  (2026-11-24, GE-08's live half); `fidelity.toml` records what was
+  measured, the labels stay as they were until GE-10 stamps `verified`:
+  - A collaborator re-PUT on a pending invitation answers 201 with the
+    invitation and keeps its role (it changed it to the PUT's).
+  - `DELETE /installation/token` (`token-revocation-propagation`, new):
+    the token keeps working on other routes for 500 ms on the virtual
+    clock (`tokens::REVOCATION_PROPAGATION`), then 401; a second `DELETE`
+    is 401 at once. GitHub accepted 2 of 8 uses right after the `DELETE`
+    and refused every use from 0.78 s on. A test that revokes and expects
+    the next call to fail advances the clock a second first.
+    `token-revocation-immediate` now covers only an uninstall.
+  - `PATCH /user/memberships/orgs/{org}` answers 202 (was 200).
+  - App JWTs: `iat` may be up to 60 s ahead (was 30 s) and a numeric
+    string; `exp` is bounded by now only, not by `iat`; the 401 texts are
+    GitHub's per case (`Bad credentials` for a malformed, `alg: none` or
+    expired JWT, a missing `exp` or a future `iat`; `'Issuer' claim
+    ('iss') must be an Integer` for an unknown client ID; `Missing 'issued
+    at' claim ('iat') in assertion`); `token <jwt>` on a JWT route is `A
+    JSON web token could not be decoded`.
+  - The token endpoint: a `client_id` naming no App is a 404 `{"error":
+    "Not Found"}` (a wrong secret is still `incorrect_client_credentials`);
+    any `grant_type` but `refresh_token` is read as the code grant (no
+    more `unsupported_grant_type`); `error_uri` is absolute on
+    docs.github.com; `bad_refresh_token` points at `#bad-verification-code`.
+  - Installation tokens are 383 characters (were about 520; fewer inner
+    claims). A token narrowed by `permissions` answers exactly the
+    permissions asked (it still holds `metadata: read`) and reports
+    `repository_selection: "selected"` (`token-narrowed-selection`, new).
+    The 422 for a higher or unknown level says `The level of access for
+    permissions requested are not granted to this installation.`;
+    repositories are checked before the 500 cap; the route's errors name
+    `https://docs.github.com/rest/reference/apps#…` as `documentation_url`.
+  - A token used while its installation is suspended: 403 `This GitHub App
+    installation is currently suspended.`; an installation the App
+    suspended itself names its bot as `suspended_by`
+    (`Installation::suspended_by_app_id`); an organization's installation
+    `html_url` is `/organizations/{org}/settings/installations/{id}`.
+  - The App's bot: URLs percent-encode the brackets
+    (`/users/{slug}%5Bbot%5D`), and `GET /users/{slug}[bot]` answers it
+    with the ID it has as inviter and sender.
+  - `GET /app` and installations list `events` sorted; `external_url` is
+    the seeded `App::external_url`, else the App's page.
+  - `member.edited`'s `changes` has no `old_permission`.
+  - An unsupported `X-GitHub-Api-Version` is a 400 `{"message": "Bad
+    Request", "errors": "The version you specified…", "documentation_url":
+    "https://docs.github.com/rest"}` (was `Unsupported API version
+    <value>`).
+- Seeded repository settings: `Repo::has_wiki`, `has_downloads` and
+  `allow_forking` (default true, as before).
 - Response objects carry every field their OpenAPI schema requires, as the
   fidelity suite's schema check found missing: users (`simple-user`'s nine
   URL templates, on App bots too), organizations (`organization-simple`'s

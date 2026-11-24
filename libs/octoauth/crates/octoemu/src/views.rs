@@ -158,9 +158,15 @@ const REPOSITORY_URLS: &[(&str, &str)] = &[
     ("trees_url", "/git/trees{/sha}"),
 ];
 
+/// `login` as a URL path segment: a bot's `[bot]` percent-encoded, as
+/// GitHub writes it (`/users/octoapp%5Bbot%5D`).
+fn url_login(login: &str) -> String {
+    login.replace('[', "%5B").replace(']', "%5D")
+}
+
 /// A `simple-user`'s URL templates.
 fn user_urls(body: &mut Value, origin: &str, login: &str) {
-    let base = format!("{origin}/users/{login}");
+    let base = format!("{origin}/users/{}", url_login(login));
     for (field, path) in [
         ("followers_url", "/followers"),
         ("following_url", "/following{/other_user}"),
@@ -410,11 +416,14 @@ impl View<'_> {
         {
             (user.id, user.login.as_str(), user.kind.as_str())
         } else {
-            let org = self
+            let Some(org) = self
                 .world
                 .orgs
                 .iter()
-                .find(|o| o.login.eq_ignore_ascii_case(login))?;
+                .find(|o| o.login.eq_ignore_ascii_case(login))
+            else {
+                return self.bot_app(login).map(|app| self.app_bot(app));
+            };
             (org.id, org.login.as_str(), "Organization")
         };
         let mut body = json!({
@@ -423,7 +432,7 @@ impl View<'_> {
             "node_id": node_id(kind, id),
             "avatar_url": format!("{origin}/avatars/u/{id}?v=4"),
             "gravatar_id": "",
-            "url": format!("{origin}/users/{login}"),
+            "url": format!("{origin}/users/{}", url_login(login)),
             "html_url": format!("{origin}/{login}"),
             "type": kind,
             "site_admin": false,
@@ -502,13 +511,13 @@ impl View<'_> {
             ("license", Value::Null),
             ("has_issues", true.into()),
             ("has_projects", true.into()),
-            ("has_wiki", true.into()),
+            ("has_wiki", repo.has_wiki.into()),
             ("has_pages", false.into()),
-            ("has_downloads", true.into()),
+            ("has_downloads", repo.has_downloads.into()),
             ("has_discussions", false.into()),
             ("is_template", false.into()),
             ("topics", json!([])),
-            ("allow_forking", true.into()),
+            ("allow_forking", repo.allow_forking.into()),
             ("web_commit_signoff_required", false.into()),
         ] {
             body[field] = value;
@@ -590,8 +599,21 @@ impl View<'_> {
         Some(body)
     }
 
+    /// The App whose bot account is `login` (`{slug}[bot]`).
+    fn bot_app(&self, login: &str) -> Option<u64> {
+        let slug = login
+            .strip_suffix("[bot]")
+            .or_else(|| login.strip_suffix("[BOT]"))?;
+        self.world
+            .apps
+            .iter()
+            .find(|app| app.slug.eq_ignore_ascii_case(slug))
+            .map(|app| app.id)
+    }
+
     /// An App's bot account (`{slug}[bot]`, `type: "Bot"`), the actor of
-    /// what an installation token does (behaviour `app-bot-account`).
+    /// what an installation token does (behaviour `app-bot-account`). Its
+    /// URLs percent-encode the brackets, as GitHub's do.
     pub(crate) fn app_bot(&self, app_id: u64) -> Value {
         let origin = self.origin;
         let slug = self
@@ -608,7 +630,7 @@ impl View<'_> {
             "node_id": node_id("Bot", id),
             "avatar_url": format!("{origin}/avatars/u/{id}?v=4"),
             "gravatar_id": "",
-            "url": format!("{origin}/users/{login}"),
+            "url": format!("{origin}/users/{}", url_login(&login)),
             "html_url": format!("{origin}/apps/{slug}"),
             "type": "Bot",
             "site_admin": false,
@@ -684,13 +706,30 @@ impl View<'_> {
         let origin = self.origin;
         let app = self.world.apps.iter().find(|a| a.id == installation.app_id);
         let permissions = crate::apps::granted(self.world, installation);
-        let events = installation
+        let mut events = installation
             .events
             .clone()
             .or_else(|| app.map(|a| a.events.clone()))
             .unwrap_or_default();
+        // GitHub lists events sorted (measured).
+        events.sort();
         let created = installation.created_at.unwrap_or(self.start);
         let (target_id, target_type) = self.target(&installation.account);
+        // An organization's installation settings live under the
+        // organization (measured); a user's under their own settings.
+        let html_url = if target_type == "Organization" {
+            format!(
+                "{origin}/organizations/{}/settings/installations/{}",
+                installation.account, installation.id
+            )
+        } else {
+            format!("{origin}/settings/installations/{}", installation.id)
+        };
+        let suspended_by = match (&installation.suspended_by, installation.suspended_by_app_id) {
+            (Some(login), _) => self.account(login),
+            (None, Some(app_id)) => Some(self.app_bot(app_id)),
+            (None, None) => None,
+        };
         json!({
             "id": installation.id,
             "client_id": app.map(|a| a.client_id.as_str()),
@@ -698,7 +737,7 @@ impl View<'_> {
             "repository_selection": installation.repository_selection,
             "access_tokens_url": format!("{origin}/app/installations/{}/access_tokens", installation.id),
             "repositories_url": format!("{origin}/installation/repositories"),
-            "html_url": format!("{origin}/settings/installations/{}", installation.id),
+            "html_url": html_url,
             "app_id": installation.app_id,
             "app_slug": app.map(|a| a.slug.as_str()),
             "target_id": target_id,
@@ -710,7 +749,7 @@ impl View<'_> {
             "single_file_name": null,
             "has_multiple_single_files": false,
             "single_file_paths": [],
-            "suspended_by": installation.suspended_by.as_deref().and_then(|login| self.account(login)),
+            "suspended_by": suspended_by,
             "suspended_at": installation.suspended_at.map(timestamp),
         })
     }
@@ -725,6 +764,8 @@ impl View<'_> {
             .iter()
             .filter(|i| i.app_id == app.id)
             .count();
+        let mut events = app.events.clone();
+        events.sort();
         json!({
             "id": app.id,
             "slug": app.slug,
@@ -733,12 +774,15 @@ impl View<'_> {
             "owner": app.owner.as_deref().and_then(|login| self.account(login)),
             "name": app.name.as_deref().unwrap_or(&app.slug),
             "description": "",
-            "external_url": format!("{origin}/apps/{}", app.slug),
+            "external_url": app
+                .external_url
+                .clone()
+                .unwrap_or_else(|| format!("{origin}/apps/{}", app.slug)),
             "html_url": format!("{origin}/apps/{}", app.slug),
             "created_at": created,
             "updated_at": created,
             "permissions": app.permissions,
-            "events": app.events,
+            "events": events,
             "installations_count": installations,
         })
     }

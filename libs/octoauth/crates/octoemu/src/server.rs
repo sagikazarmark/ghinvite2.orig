@@ -75,7 +75,7 @@ pub(crate) async fn route_context(
     } else if let Some(refusal) = api_version(&shared, &request) {
         refusal
     } else {
-        match auth::authenticate(&shared, request.headers()).and_then(|caller| {
+        match auth::authenticate(&shared, request.headers(), Some(auth)).and_then(|caller| {
             auth::admit(&shared, auth, &caller)?;
             Ok(caller)
         }) {
@@ -99,9 +99,11 @@ pub(crate) async fn route_context(
 pub(crate) const API_VERSIONS: &[&str] = &["2022-11-28", "2026-03-10"];
 
 /// An `X-GitHub-Api-Version` naming no supported version, on the REST API:
-/// a 400 (behaviour `unsupported-api-version`; withheld in refuse-assumed
-/// mode, where the call answers the refusal). Without the header the
-/// default version applies. Web and avatar routes ignore it.
+/// a 400 `Bad Request` whose `errors` is a sentence naming the value and
+/// the supported versions, before the credential is checked (measured;
+/// behaviour `unsupported-api-version`; in refuse-assumed mode the call
+/// answers the refusal). Without the header the default version applies.
+/// Web and avatar routes ignore it.
 fn api_version(shared: &crate::state::Shared, request: &Request) -> Option<Response> {
     if Surface::of(request.uri().path()) != Surface::Api {
         return None;
@@ -117,10 +119,19 @@ fn api_version(shared: &crate::state::Shared, request: &Request) -> Option<Respo
         return Some(refusal);
     }
     let version = value.to_str().unwrap_or("").trim();
-    Some(response::error(
+    let errors = format!(
+        "The version you specified in the \"X-GitHub-API-Version\" request header, \"{version}\", \
+         is not a supported version. The following versions are currently supported: \
+         \"{}\" (most recent) and \"{}\".",
+        API_VERSIONS[1], API_VERSIONS[0],
+    );
+    Some(response::json(
         StatusCode::BAD_REQUEST,
-        &format!("Unsupported API version {version}"),
-        "https://docs.github.com/rest/about-the-rest-api/api-versions",
+        &serde_json::json!({
+            "message": "Bad Request",
+            "errors": errors,
+            "documentation_url": response::REST_DOCS,
+        }),
     ))
 }
 
@@ -299,7 +310,7 @@ async fn inject(
     // Who the credential belongs to, for the call log, when the handler
     // (and so the route's own check) does not run.
     let caller = || {
-        auth::authenticate(shared, request.headers())
+        auth::authenticate(shared, request.headers(), None)
             .ok()
             .and_then(|caller| caller.identity())
     };

@@ -330,7 +330,7 @@ async fn the_token_endpoint_error_matrix() {
     let bad_code = json!({
         "error": "bad_verification_code",
         "error_description": "The code passed is incorrect or expired.",
-        "error_uri": "/apps/managing-oauth-apps/troubleshooting-oauth-app-access-token-request-errors/#bad-verification-code",
+        "error_uri": "https://docs.github.com/apps/managing-oauth-apps/troubleshooting-oauth-app-access-token-request-errors/#bad-verification-code",
     });
     let v = verifier();
 
@@ -408,13 +408,25 @@ async fn the_token_endpoint_error_matrix() {
     .await;
     assert_eq!(answer, bad_code);
 
-    // A wrong secret, an unknown client.
+    // An unknown client is a 404 (measured).
+    let unknown = client()
+        .post(format!("{}/login/oauth/access_token", emulator.web_base()))
+        .header("accept", "application/json")
+        .form(&[
+            ("client_id", "Iv23.nobody"),
+            ("client_secret", SECRET),
+            ("code", "x"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+    let body: Value = serde_json::from_str(&unknown.text().await.unwrap()).unwrap();
+    assert_eq!(body, json!({"error": "Not Found"}));
+
+    // A wrong secret.
     let code = code_for(&emulator, CLIENT_ID, "octocat").await;
-    for (id, secret) in [
-        (CLIENT_ID, "wrong"),
-        ("Iv23.nobody", SECRET),
-        (CLIENT_ID, ""),
-    ] {
+    for (id, secret) in [(CLIENT_ID, "wrong"), (CLIENT_ID, "")] {
         let answer = exchange(
             &emulator,
             &[
@@ -430,7 +442,7 @@ async fn the_token_endpoint_error_matrix() {
             json!({
                 "error": "incorrect_client_credentials",
                 "error_description": "The client_id and/or client_secret passed are incorrect.",
-                "error_uri": "/apps/managing-oauth-apps/troubleshooting-oauth-app-access-token-request-errors/#incorrect-client-credentials",
+                "error_uri": "https://docs.github.com/apps/managing-oauth-apps/troubleshooting-oauth-app-access-token-request-errors/#incorrect-client-credentials",
             })
         );
     }
@@ -446,17 +458,18 @@ async fn the_token_endpoint_error_matrix() {
         "The user must have a verified primary email."
     );
 
-    // Another grant type.
+    // Another grant type is read as the code grant (measured).
     let answer = exchange(
         &emulator,
         &[
             ("client_id", CLIENT_ID),
             ("client_secret", SECRET),
             ("grant_type", "password"),
+            ("code", "0123456789abcdef0123"),
         ],
     )
     .await;
-    assert_eq!(answer["error"], "unsupported_grant_type");
+    assert_eq!(answer, bad_code);
 }
 
 #[tokio::test]
@@ -631,7 +644,7 @@ async fn an_app_without_expiring_tokens_gets_no_refresh_token() {
 #[tokio::test]
 async fn authorize_errors_redirect_as_documented() {
     let emulator = Emulator::start(seed()).await.unwrap();
-    let error_uri = "/apps/building-integrations/setting-up-and-registering-oauth-apps/troubleshooting-authorization-request-errors/";
+    let error_uri = "https://docs.github.com/apps/building-integrations/setting-up-and-registering-oauth-apps/troubleshooting-authorization-request-errors/";
 
     // An unregistered redirect_uri: to the first registered callback.
     let response = authorize(
