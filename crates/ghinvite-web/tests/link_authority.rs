@@ -640,10 +640,11 @@ async fn delivery_progress_covers_an_approved_request_in_scope_order() {
 async fn attempts_without_a_requester_or_with_oversized_input_are_refused() {
     let link = link();
     let (fake, authority) = authority_with(&link).await;
+    // Both handlers conceal an attempt without a requester as missing.
     let nobody = admit(&link, 0, None);
     assert!(matches!(
         authority.prepare(nobody.clone()).await,
-        Err(AuthorityError::Invalid)
+        Err(AuthorityError::Missing)
     ));
     assert!(matches!(
         authority.admit(nobody).await,

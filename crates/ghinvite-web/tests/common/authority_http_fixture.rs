@@ -731,9 +731,11 @@ fn answer(inner: &mut Inner, service: &str, key: String, method: &str, body: Val
                         .filter(|r| r.link_id == Some(command.link_id))
                     {
                         addressed_requests += 1;
-                        request
-                            .cancel_for_revoked_link(now)
-                            .expect("fixture revision in range");
+                        // The link reaches each request with a one-way send,
+                        // so a request whose revision is exhausted fails only
+                        // its own cascade: it stays unchanged, pending, while
+                        // the revocation is still accepted.
+                        let _ = request.cancel_for_revoked_link(now);
                     }
                 }
                 inner.applied.push(method.into());
@@ -927,8 +929,12 @@ fn answer(inner: &mut Inner, service: &str, key: String, method: &str, body: Val
             let Ok(mut command) = serde_json::from_value::<Admit>(body) else {
                 return status(400);
             };
-            if command.normalize().is_err() || command.requester_id == 0 {
+            if command.normalize().is_err() {
                 return status(400);
+            }
+            // As the real handler: no requester is no attempt to prepare.
+            if command.requester_id == 0 {
+                return status(404);
             }
             if !inner.links.contains_key(&key) {
                 return status(404);
@@ -1052,9 +1058,17 @@ fn answer(inner: &mut Inner, service: &str, key: String, method: &str, body: Val
                 (None, None)
             } else {
                 let approval_required = link.creation.approval_required;
-                let request = command
-                    .accept(&mut link, RequestId::new(), approval_required, now)
-                    .expect("fixture use count in range");
+                let Some(request) =
+                    command.accept(&mut link, RequestId::new(), approval_required, now)
+                else {
+                    // An exhausted use counter is invalid input to the real
+                    // object, which applies no admission. The owner has
+                    // already kept an overdue blocker's expiry.
+                    if let Some(expired) = &expired {
+                        keep(inner, expired);
+                    }
+                    return status(400);
+                };
                 let result = AdmissionResult::Accepted {
                     request_id: request.request_id,
                     state: request.state,
