@@ -26,7 +26,8 @@ use crate::flash::Flash;
 use crate::layouts::ConsoleLayout;
 use crate::link_form::{
     CreateLinkForm, LINK_FORM_ISLAND_MODULE_SRC, LINK_FORM_ISLAND_PROPS_ID,
-    LINK_FORM_ISLAND_ROOT_ID, LinkFormIslandProps, RepositoryChoice,
+    LINK_FORM_ISLAND_ROOT_ID, LinkFormIslandProps, REPO_GOTO_FIELD, REPO_PAGE_FIELD,
+    REPO_QUERY_FIELD, REPO_SEARCH_FIELD, RepositoryChoice, RepositoryPicker,
 };
 use chrono::{DateTime, Utc};
 use dioform_core::Form;
@@ -100,16 +101,17 @@ pub struct LinkCreateFormPageProps {
     pub access_removal_enabled: bool,
     #[props(default)]
     pub eligibility: crate::organization_eligibility::Eligibility,
-    #[props(default)]
-    pub search_first: bool,
     /// `action` of the form: the route that handles the POST, carrying the
     /// creation identity.
     pub action: String,
     pub signed_in_login: Option<String>,
     pub flash: Option<Flash>,
     pub account_login: String,
-    /// Available repositories, in the order the account makes them available.
+    /// The repositories the form offers: the picker's pinned selections, then
+    /// its page (see [`RepositoryPicker`]).
     pub repos: Vec<RepositoryChoice>,
+    #[props(default)]
+    pub picker: RepositoryPicker,
     #[props(default)]
     pub organization: crate::link_form::OrganizationOffer,
     #[props(default)]
@@ -125,15 +127,16 @@ pub struct LinkCreateFormPageProps {
 /// the island root, the island's props blob and module script.
 #[component]
 pub fn LinkCreateFormPage(mut props: LinkCreateFormPageProps) -> Element {
-    if props.form.repo_grants.is_empty()
-        && props.form.selected_repo_ids.is_empty()
-        && props.form.errors.is_empty()
-    {
-        props.form.repo_grants = props
-            .repos
-            .iter()
-            .map(|repo| format!("{}:pull", repo.id))
-            .collect();
+    // Every offered repository the admin has not selected starts at `pull`, so
+    // selecting one later (on this page or after paging to it) already carries
+    // the grant its select displays. A selected repository keeps exactly what
+    // was submitted, which validation judges.
+    for repo in &props.repos {
+        if !props.form.selected_repo_ids.contains(&repo.id)
+            && crate::link_form::raw_repo_grant(&props.form.repo_grants, repo.id).is_none()
+        {
+            props.form.repo_grants.push(format!("{}:pull", repo.id));
+        }
     }
     let login = props.account_login.clone();
     let action = props.action.clone();
@@ -146,6 +149,7 @@ pub fn LinkCreateFormPage(mut props: LinkCreateFormPageProps) -> Element {
         action: action.clone(),
         values: props.form.clone(),
         repos: props.repos.clone(),
+        picker: props.picker.clone(),
         organization: props.organization.clone(),
         now: props.now,
     }
@@ -166,16 +170,6 @@ pub fn LinkCreateFormPage(mut props: LinkCreateFormPageProps) -> Element {
                         "Create a controlled invitation link that lets GitHub users request repository access to selected repositories."
                     }
                 }
-                if props.search_first {
-                    form { method: "get", action: "/console/accounts/{login}/links/new", class: "mb-6 flex items-end gap-3",
-                        div {
-                            label { r#for: "repository-search", class: "block text-sm font-medium", "Find repositories" }
-                            input { id: "repository-search", name: "q", r#type: "search", maxlength: "100", class: "input input-bordered", placeholder: "Repository name" }
-                        }
-                        button { r#type: "submit", class: "btn btn-secondary", "Search" }
-                    }
-                    p { class: "mb-4 text-sm", "Search shows up to 20 repositories. Access is checked for your selection before the invitation link is created." }
-                }
                 // The island root: `dioxus-web` mounts here and re-renders
                 // `LinkCreateForm` from the props blob below.
                 div { id: LINK_FORM_ISLAND_ROOT_ID,
@@ -184,6 +178,7 @@ pub fn LinkCreateFormPage(mut props: LinkCreateFormPageProps) -> Element {
                         action: action.clone(),
                         form: props.form.clone(),
                         repos: props.repos.clone(),
+                        picker: props.picker.clone(),
                         repository_error: props.repository_error.clone(),
                         organization: props.organization.clone(),
                         eligibility: props.eligibility.clone(),
@@ -240,6 +235,15 @@ pub struct LinkFormHandlers {
     pub repo_grant: Option<EventHandler<(u64, String)>>,
     pub set_all: Option<EventHandler<MouseEvent>>,
     pub repo_grant_blur: Option<EventHandler<FocusEvent>>,
+    /// Fired when a repository picker button (Search, Previous, Next) is
+    /// clicked. Those native POSTs only re-render the form, so the island lets
+    /// them through without its submit preflight.
+    pub picker_submit: Option<EventHandler<MouseEvent>>,
+    /// Fired when the form's hidden default button is clicked: the browser's
+    /// implicit submission when Enter is pressed in a text field.
+    pub default_submit: Option<EventHandler<MouseEvent>>,
+    /// Fired on keydown in the repository filter, so Enter there can search.
+    pub picker_query_keydown: Option<EventHandler<KeyboardEvent>>,
 }
 
 /// Listeners for the repository checkbox group ([`RepositoryScopeGroup`]).
@@ -263,8 +267,9 @@ pub fn LinkCreateForm(
     /// `action` of the form; the route that handles the POST.
     action: String,
     form: LinkFormValues,
-    /// Available repositories, in the order the account makes them available.
+    /// The repositories offered: the picker's pinned selections, then its page.
     repos: Vec<RepositoryChoice>,
+    #[props(default)] picker: RepositoryPicker,
     #[props(default)] repository_error: Option<String>,
     #[props(default)] organization: crate::link_form::OrganizationOffer,
     #[props(default)] eligibility: crate::organization_eligibility::Eligibility,
@@ -292,6 +297,17 @@ pub fn LinkCreateForm(
     rsx! {
         form { method: "post", action: "{action}", "data-repository-authority": "{repository_authority}", class: "max-w-3xl space-y-5", ..form_listeners,
             crate::csrf::CsrfField {}
+            // The form's default button: Enter in a text field clicks the
+            // first submit button in tree order. Without this one that is
+            // "Apply permission to all repositories", which would rewrite
+            // every grant when the admin presses Enter in the repository
+            // filter. A search only re-renders the form with its values.
+            if repository_error.is_none() {
+                button { r#type: "submit", name: REPO_SEARCH_FIELD, value: "true", formnovalidate: true, tabindex: "-1", aria_hidden: "true", class: "sr-only",
+                    onclick: move |event| { if let Some(handler) = handlers.default_submit { handler.call(event); } },
+                    "Search repositories"
+                }
+            }
             crate::organization_eligibility::Panel { facts: eligibility, targets }
             {if form.errors.summary.is_empty() {
                 rsx! {}
@@ -546,6 +562,9 @@ pub fn LinkCreateForm(
                     RepositoryScopeGroup {
                         name: fields.repo_ids().field_name().to_string(),
                         repos: repos.clone(),
+                        picker: picker.clone(),
+                        onpicker: handlers.picker_submit,
+                        onquerykeydown: handlers.picker_query_keydown,
                         selected: form.selected_repo_ids.clone(),
                         help: "Select every repository this invitation link may grant access to.",
                         error: form.errors.repo_scope.clone(),
@@ -689,10 +708,58 @@ pub struct RepositoryScopeGroupProps {
     pub onchange: Option<EventHandler<(u64, bool)>>,
     /// Fired when focus leaves any checkbox (island only; ignored by SSR).
     pub onblur: Option<EventHandler<FocusEvent>>,
+    /// Which slice of the installation `repos` is; the default lists `repos`
+    /// as one unfiltered page.
+    #[props(default)]
+    pub picker: RepositoryPicker,
+    /// Fired when a picker button is clicked (island only; ignored by SSR).
+    #[props(default)]
+    pub onpicker: Option<EventHandler<MouseEvent>>,
+    /// Fired on keydown in the filter (island only; ignored by SSR).
+    #[props(default)]
+    pub onquerykeydown: Option<EventHandler<KeyboardEvent>>,
 }
 
-/// The repository-scope section body: heading, help, the checkbox group (or
-/// the "no repositories" notice), and the error under it.
+/// What the picker says about the repositories listed, if anything: the
+/// delegated search prompt, how many match the filter, or nothing for an
+/// unfiltered list that fits on one page.
+fn picker_status(picker: &RepositoryPicker) -> Option<String> {
+    let query = picker.query.trim();
+    let count = |n: usize| match n {
+        1 => "1 repository".to_string(),
+        n => format!("{n} repositories"),
+    };
+    if query.is_empty() {
+        if picker.search_required {
+            return Some(format!(
+                "Search by repository name. Up to {} matches are listed; access is checked for each repository you select.",
+                crate::link_form::DELEGATED_SEARCH_LIMIT
+            ));
+        }
+        return (picker.pages > 1)
+            .then(|| format!("{} in this installation.", count(picker.matches)));
+    }
+    Some(if picker.truncated {
+        format!(
+            "More than {} repositories match “{query}”. Refine the search to list the rest.",
+            crate::link_form::DELEGATED_SEARCH_LIMIT
+        )
+    } else if picker.matches == 0 {
+        format!("No repositories match “{query}”.")
+    } else if picker.matches == 1 {
+        format!("1 repository matches “{query}”.")
+    } else {
+        format!("{} match “{query}”.", count(picker.matches))
+    })
+}
+
+/// The repository-scope section body: heading, help, the picker's filter,
+/// the checkbox group (or the "no repositories" notice), its pages, and the
+/// error under it.
+///
+/// The filter and the page buttons are submit buttons of the create form
+/// (`formnovalidate`): the route re-renders the form with every value kept
+/// and the matching page listed. Selections from elsewhere are listed first.
 ///
 /// The group is the "control" for the repository scope: labelled by the
 /// heading, described by the help text and, on failure, the error under the
@@ -711,6 +778,26 @@ pub fn RepositoryScopeGroup(props: RepositoryScopeGroupProps) -> Element {
     } else {
         "max-h-80 space-y-1 overflow-y-auto rounded-box border border-base-300 bg-base-200 p-3"
     };
+    let picker = props.picker.clone();
+    let filtered = !picker.query.trim().is_empty();
+    // Nothing to search when the installation has no repositories at all.
+    let searchable = !props.repos.is_empty() || filtered || picker.search_required;
+    let status = picker_status(&picker);
+    let pinned = picker.pinned.min(props.repos.len());
+    let picker_listeners = || {
+        let mut listeners: Vec<Attribute> = Vec::new();
+        if let Some(handler) = props.onpicker {
+            listeners.push(dioxus_elements::events::onclick(handler));
+        }
+        listeners
+    };
+    let mut query_listeners: Vec<Attribute> = Vec::new();
+    if let Some(handler) = props.onquerykeydown {
+        query_listeners.push(dioxus_elements::events::onkeydown(handler));
+    }
+    let search_listeners = picker_listeners();
+    let previous_listeners = picker_listeners();
+    let next_listeners = picker_listeners();
 
     rsx! {
         div {
@@ -719,8 +806,25 @@ pub fn RepositoryScopeGroup(props: RepositoryScopeGroupProps) -> Element {
                 p { id: "repo_ids-help", class: "mt-1 text-sm text-base-content/65", "{help}" }
             })}
         }
+        if searchable {
+            div { class: "flex flex-wrap items-end gap-2",
+                div { class: "form-control min-w-0 grow gap-1",
+                    label { r#for: "repo_query", class: "label-text font-medium", "Find repositories" }
+                    input { id: "repo_query", r#type: "search", name: REPO_QUERY_FIELD, value: "{picker.query}", maxlength: "100", placeholder: "Repository name", class: "input input-bordered input-sm w-full", aria_describedby: if status.is_some() { Some("repo_query-status") } else { None }, ..query_listeners }
+                }
+                button { r#type: "submit", name: REPO_SEARCH_FIELD, value: "true", formnovalidate: true, class: "btn btn-sm", ..search_listeners, "Search" }
+            }
+            input { r#type: "hidden", name: REPO_PAGE_FIELD, value: "{picker.page}" }
+            if let Some(status) = &status {
+                p { id: "repo_query-status", class: "text-sm text-base-content/65", "{status}" }
+            }
+        }
         {if props.repos.is_empty() {
-            rsx! { div { class: "alert shadow-sm", span { "No repositories are available for this installation." } } }
+            if searchable {
+                rsx! {}
+            } else {
+                rsx! { div { class: "alert shadow-sm", span { "No repositories are available for this installation." } } }
+            }
         } else {
             rsx! {
                 div {
@@ -729,7 +833,7 @@ pub fn RepositoryScopeGroup(props: RepositoryScopeGroupProps) -> Element {
                     class: "{group_class}",
                     aria_labelledby: "repo_ids-label",
                     aria_describedby: described_by,
-                    {props.repos.iter().map(|repo| {
+                    {props.repos.iter().enumerate().map(|(index, repo)| {
                         let id = repo.id;
                         let checked = props.selected.contains(&id);
                         let full_name = repo.full_name.clone();
@@ -753,6 +857,12 @@ pub fn RepositoryScopeGroup(props: RepositoryScopeGroupProps) -> Element {
                             listeners.push(dioxus_elements::events::onblur(handler));
                         }
                         rsx! {
+                            if pinned > 0 && index == 0 {
+                                p { class: "px-2 text-xs font-medium text-base-content/65", "Selected, not on this page" }
+                            }
+                            if pinned > 0 && index == pinned {
+                                p { class: "px-2 pt-2 text-xs font-medium text-base-content/65", "On this page" }
+                            }
                             label { class: "repo-choice-row flex cursor-pointer items-center gap-3 rounded-lg px-2 py-1.5 text-sm hover:bg-base-100",
                                 input { r#type: "checkbox", name: "{props.name}", value: "{id}", checked: checked, class: "checkbox checkbox-sm", aria_labelledby: "repo-choice-{id}-label", ..listeners }
                                 span { id: "repo-choice-{id}-label", class: "text-sm", "{full_name}" }
@@ -776,6 +886,13 @@ pub fn RepositoryScopeGroup(props: RepositoryScopeGroupProps) -> Element {
                 }
             }
         }}
+        if picker.pages > 1 {
+            nav { aria_label: "Repository pages", class: "flex items-center justify-between gap-2",
+                button { r#type: "submit", name: REPO_GOTO_FIELD, value: "{picker.page.saturating_sub(1)}", formnovalidate: true, disabled: picker.page <= 1, class: "btn btn-sm", ..previous_listeners, "Previous page" }
+                span { class: "text-sm tabular-nums", "Page {picker.page} of {picker.pages}" }
+                button { r#type: "submit", name: REPO_GOTO_FIELD, value: "{picker.page + 1}", formnovalidate: true, disabled: picker.page >= picker.pages, class: "btn btn-sm", ..next_listeners, "Next page" }
+            }
+        }
         {error_text("repo_ids-error", props.error.as_deref())}
         {props.grant_error.as_ref().map(|message| rsx! { p { id: "repo_grants-error", aria_live: "polite", class: "text-sm font-medium text-error", "{message}" } })}
     }
@@ -1307,6 +1424,15 @@ mod tests {
         let blob = &page[blob_start + PROPS_SCRIPT_OPEN.len()..];
         let blob = &blob[..blob.find("</script>").unwrap()];
         let props: LinkFormIslandProps = serde_json::from_str(blob).unwrap();
+        // The unselected repositories start at `pull`; the selected one keeps
+        // exactly what was submitted.
+        let mut form = form;
+        form.repo_grants.extend(
+            acme_repos()
+                .iter()
+                .filter(|repo| repo.id != 11)
+                .map(|repo| format!("{}:pull", repo.id)),
+        );
         assert_eq!(
             props,
             LinkFormIslandProps {
@@ -1317,6 +1443,7 @@ mod tests {
                 action: "/console/accounts/acme/links".to_string(),
                 values: form,
                 repos: acme_repos(),
+                picker: RepositoryPicker::default(),
                 now: dt("2026-05-04T12:00:00Z"),
             }
         );
@@ -1479,18 +1606,34 @@ mod tests {
             },
         };
 
-        for (form, repos) in [
-            (LinkFormValues::default(), acme_repos()),
-            (with_errors.clone(), acme_repos()),
-            (with_errors, vec![]),
+        // A filtered middle page with a pinned selection renders every
+        // picker control, including both page buttons.
+        let paged = RepositoryPicker {
+            query: "acme".into(),
+            page: 2,
+            pages: 3,
+            matches: 120,
+            pinned: 1,
+            ..RepositoryPicker::default()
+        };
+        for (form, repos, picker) in [
+            (
+                LinkFormValues::default(),
+                acme_repos(),
+                RepositoryPicker::default(),
+            ),
+            (with_errors.clone(), acme_repos(), paged),
+            (with_errors, vec![], RepositoryPicker::default()),
         ] {
-            let (plain_form, plain_repos) = (form.clone(), repos.clone());
+            let (plain_form, plain_repos, plain_picker) =
+                (form.clone(), repos.clone(), picker.clone());
             let plain = crate::testing::render(move || {
                 rsx! {
                     LinkCreateForm {
                         action: "/console/accounts/acme/links".to_string(),
                         form: plain_form.clone(),
                         repos: plain_repos.clone(),
+                        picker: plain_picker.clone(),
                     }
                 }
             });
@@ -1529,12 +1672,16 @@ mod tests {
                         onchange: Some(EventHandler::new(|_change: (u64, bool)| {})),
                         onblur: Some(EventHandler::new(|_event: FocusEvent| {})),
                     },
+                    picker_submit: Some(EventHandler::new(|_event: MouseEvent| {})),
+                    default_submit: Some(EventHandler::new(|_event: MouseEvent| {})),
+                    picker_query_keydown: Some(EventHandler::new(|_event: KeyboardEvent| {})),
                 };
                 rsx! {
                     LinkCreateForm {
                         action: "/console/accounts/acme/links".to_string(),
                         form: form.clone(),
                         repos: repos.clone(),
+                        picker: picker.clone(),
                         handlers: handlers,
                     }
                 }
@@ -1786,6 +1933,165 @@ mod tests {
         assert!(html.contains("id=\"repo_ids-error\""));
         assert!(!html.contains("name=\"repo_ids\""));
         assert!(!html.contains("role=\"group\""));
+        // Nothing to search in an installation without repositories.
+        assert!(!html.contains("name=\"repo_query\""));
+    }
+
+    fn picker_group(
+        repos: Vec<RepositoryChoice>,
+        selected: Vec<u64>,
+        picker: RepositoryPicker,
+    ) -> String {
+        crate::testing::render(move || {
+            rsx! {
+                RepositoryScopeGroup {
+                    name: "repo_ids".to_string(),
+                    repos: repos.clone(),
+                    selected: selected.clone(),
+                    help: "Select every repository.".to_string(),
+                    picker: picker.clone(),
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn repository_picker_lists_pinned_selections_before_the_page_and_pages_natively() {
+        let html = picker_group(
+            vec![
+                RepositoryChoice {
+                    id: 7,
+                    full_name: "acme/pinned".into(),
+                },
+                RepositoryChoice {
+                    id: 60,
+                    full_name: "acme/app-060".into(),
+                },
+                RepositoryChoice {
+                    id: 61,
+                    full_name: "acme/app-061".into(),
+                },
+            ],
+            vec![7, 61],
+            RepositoryPicker {
+                query: "app".into(),
+                page: 2,
+                pages: 3,
+                matches: 120,
+                pinned: 1,
+                ..RepositoryPicker::default()
+            },
+        );
+
+        assert!(html.contains(
+            "<input id=\"repo_query\" type=\"search\" name=\"repo_query\" value=\"app\""
+        ));
+        assert!(html.contains("aria-describedby=\"repo_query-status\""));
+        assert!(html.contains("120 repositories match “app”."));
+        assert!(html.contains("<input type=\"hidden\" name=\"repo_page\" value=\"2\""));
+        assert!(html.contains("name=\"repo_search\" value=\"true\" formnovalidate"));
+        // Pinned selection first, under its own caption, then this page.
+        let pinned = html.find("Selected, not on this page").unwrap();
+        let first = html.find("value=\"7\" checked").unwrap();
+        let page = html.find("On this page").unwrap();
+        assert!(pinned < first && first < page);
+        assert!(page < html.find("value=\"60\"").unwrap());
+        assert!(html.contains("value=\"61\" checked"));
+        // Both page buttons submit the target page without validation.
+        assert!(html.contains("name=\"repo_goto\" value=\"1\" formnovalidate=true"));
+        assert!(html.contains("name=\"repo_goto\" value=\"3\" formnovalidate=true"));
+        assert!(html.contains("Page 2 of 3"));
+        assert!(html.contains("aria-label=\"Repository pages\""));
+    }
+
+    #[test]
+    fn repository_picker_disables_the_page_buttons_at_either_end() {
+        for (page, disabled) in [
+            (1, "value=\"0\" formnovalidate=true disabled=true"),
+            (3, "value=\"4\" formnovalidate=true disabled=true"),
+        ] {
+            let html = picker_group(
+                acme_repos(),
+                vec![],
+                RepositoryPicker {
+                    page,
+                    pages: 3,
+                    matches: 120,
+                    ..RepositoryPicker::default()
+                },
+            );
+            assert!(html.contains(disabled), "{page}: {html}");
+            assert_eq!(html.matches("disabled=true").count(), 1, "{page}");
+            assert!(html.contains("120 repositories in this installation."));
+        }
+    }
+
+    #[test]
+    fn repository_picker_states_explain_an_empty_list() {
+        // A delegated admin searches first; nothing is listed until then.
+        let html = picker_group(
+            vec![],
+            vec![],
+            RepositoryPicker {
+                search_required: true,
+                ..RepositoryPicker::default()
+            },
+        );
+        assert!(html.contains("name=\"repo_query\""));
+        assert!(html.contains("Search by repository name. Up to 20 matches are listed"));
+        assert!(!html.contains("No repositories are available"));
+        assert!(!html.contains("role=\"group\""));
+
+        let html = picker_group(
+            vec![],
+            vec![],
+            RepositoryPicker {
+                query: "nope".into(),
+                ..RepositoryPicker::default()
+            },
+        );
+        assert!(html.contains("No repositories match “nope”."));
+        assert!(!html.contains("No repositories are available"));
+
+        let html = picker_group(
+            acme_repos(),
+            vec![],
+            RepositoryPicker {
+                query: "a".into(),
+                matches: 20,
+                truncated: true,
+                search_required: true,
+                ..RepositoryPicker::default()
+            },
+        );
+        assert!(html.contains("More than 20 repositories match “a”. Refine the search"));
+        assert!(!html.contains("Repository pages"));
+
+        // One unfiltered page needs no status and no page buttons.
+        let html = picker_group(acme_repos(), vec![], RepositoryPicker::default());
+        assert!(html.contains("name=\"repo_query\" value=\"\""));
+        assert!(!html.contains("repo_query-status"));
+        assert!(!html.contains("Repository pages"));
+        assert!(!html.contains("Selected, not on this page"));
+    }
+
+    #[test]
+    fn link_create_form_default_button_searches_instead_of_applying_a_permission() {
+        let html = crate::testing::render(|| {
+            rsx! {
+                LinkCreateForm {
+                    action: "/console/accounts/acme/links".to_string(),
+                    form: LinkFormValues::default(),
+                    repos: acme_repos(),
+                }
+            }
+        });
+        // Enter in a text field clicks the first submit button in tree order.
+        let first_submit = html.find("type=\"submit\"").unwrap();
+        let default = html.find("name=\"repo_search\"").unwrap();
+        assert!(default < html.find("name=\"apply_all\"").unwrap());
+        assert!(html[first_submit..default].len() < 40, "{html}");
+        assert!(html.contains("tabindex=\"-1\" aria-hidden=\"true\" class=\"sr-only\""));
     }
 
     #[test]

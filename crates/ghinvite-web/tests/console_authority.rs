@@ -323,6 +323,14 @@ async fn delegated_search_reads_only_installation_list_and_denied_selection_cann
         ],
     )
     .await;
+    // Nothing is listed before a search.
+    let response = visit(&app, &cookie, "/console/accounts/acme/links/new", None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = text(response).await;
+    assert!(html.contains("Search by repository name. Up to 20 matches are listed"));
+    assert!(html.contains("name=\"repo_query\""));
+    assert!(!html.contains("acme/r11"));
+    assert!(!html.contains("name=\"repo_ids\""));
     let response = visit(
         &app,
         &cookie,
@@ -333,6 +341,7 @@ async fn delegated_search_reads_only_installation_list_and_denied_selection_cann
     assert_eq!(response.status(), StatusCode::OK);
     let html = text(response).await;
     assert!(html.contains("acme/r11"));
+    assert!(html.contains("1 repository matches “r11”."));
     assert_eq!(html.matches("Pending request count unavailable").count(), 2);
     assert!(!html.contains("aria-label=\"Pending requests: 0\""));
     let selection = visit(

@@ -70,6 +70,85 @@ pub struct RepositoryChoice {
     pub full_name: String,
 }
 
+/// Repositories the picker lists per page. GitHub lists installation
+/// repositories 100 to a page, so an unfiltered picker page never needs more
+/// than one listing page beyond the ones before it.
+pub const REPOSITORY_PICKER_PAGE_SIZE: usize = 50;
+/// Name matches a delegated Repository Admin is shown, without paging (P1
+/// §6.2: search-first, at most 20 candidates, no permission reads).
+pub const DELEGATED_SEARCH_LIMIT: usize = 20;
+/// Longest repository filter the picker keeps, in characters.
+pub const REPOSITORY_QUERY_MAX_CHARS: usize = 100;
+/// POST keys of the picker controls. They only steer which repositories the
+/// re-rendered form lists; none of them is part of [`CreateLinkForm`].
+pub const REPO_QUERY_FIELD: &str = "repo_query";
+pub const REPO_PAGE_FIELD: &str = "repo_page";
+pub const REPO_SEARCH_FIELD: &str = "repo_search";
+pub const REPO_GOTO_FIELD: &str = "repo_goto";
+
+/// The create form's repository picker: which slice of the installation's
+/// repositories the repository scope group lists.
+///
+/// The server filters the installation's repository list by `query` and
+/// renders one page of the matches, so neither the markup nor the island's
+/// props grow with the installation. Selected repositories outside that page
+/// are listed too, ahead of it (`pinned` of them), so a selection survives
+/// searching and paging. Searching and paging are native POSTs to the create
+/// route that only re-render the form ([`REPO_SEARCH_FIELD`],
+/// [`REPO_GOTO_FIELD`]); they never create anything, and the island does not
+/// filter on its own.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepositoryPicker {
+    /// The filter as the admin typed it; matched case-insensitively against
+    /// `owner/name`.
+    pub query: String,
+    /// The 1-based page shown.
+    pub page: usize,
+    /// Pages of matches; at least 1.
+    pub pages: usize,
+    /// Repositories matching `query` across every page.
+    pub matches: usize,
+    /// The first `pinned` repositories offered are selections from outside
+    /// this page.
+    pub pinned: usize,
+    /// A delegated Repository Admin must search before anything is listed.
+    pub search_required: bool,
+    /// More repositories match than a delegated search shows.
+    pub truncated: bool,
+}
+
+impl Default for RepositoryPicker {
+    fn default() -> Self {
+        Self {
+            query: String::new(),
+            page: 1,
+            pages: 1,
+            matches: 0,
+            pinned: 0,
+            search_required: false,
+            truncated: false,
+        }
+    }
+}
+
+impl RepositoryPicker {
+    /// `raw` as the filter the picker keeps: line breaks removed (a search
+    /// input cannot hold them) and at most [`REPOSITORY_QUERY_MAX_CHARS`].
+    pub fn normalize_query(raw: &str) -> String {
+        raw.chars()
+            .filter(|c| *c != '\r' && *c != '\n')
+            .take(REPOSITORY_QUERY_MAX_CHARS)
+            .collect()
+    }
+
+    /// Whether `full_name` matches `query` (blank matches everything).
+    pub fn matches_query(query: &str, full_name: &str) -> bool {
+        full_name
+            .to_lowercase()
+            .contains(&query.trim().to_lowercase())
+    }
+}
+
 /// Verified choices supplied by the server; these never come from POST fields.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OrganizationOffer {
@@ -461,8 +540,12 @@ pub struct LinkFormIslandProps {
     /// `action` of the form; the route that handles the POST.
     pub action: String,
     pub values: LinkFormValues,
-    /// Available repositories, in the order the account makes them available.
+    /// The repositories the form offers: the picker's pinned selections, then
+    /// its page, each in the order the account makes them available.
     pub repos: Vec<RepositoryChoice>,
+    #[serde(default)]
+    #[props(default)]
+    pub picker: RepositoryPicker,
     #[serde(default)]
     #[props(default)]
     pub organization: OrganizationOffer,
@@ -1828,6 +1911,14 @@ mod tests {
                 },
             },
             repos: available_repos(),
+            picker: RepositoryPicker {
+                query: "acme".into(),
+                page: 2,
+                pages: 3,
+                matches: 120,
+                pinned: 1,
+                ..RepositoryPicker::default()
+            },
             now: now(),
         }
     }
@@ -1851,6 +1942,33 @@ mod tests {
         assert!(json.contains("{\"id\":10,\"full_name\":\"acme/api\"}"));
         assert!(json.contains("{\"id\":12,\"full_name\":\"acme/docs\"}"));
         assert!(json.contains("\"now\":\"2026-05-04T12:00:00Z\""));
+        assert!(json.contains("\"picker\":{\"query\":\"acme\",\"page\":2,\"pages\":3,"));
+    }
+
+    #[test]
+    fn island_props_without_a_picker_list_one_unfiltered_page() {
+        // A blob written before the picker existed still mounts.
+        let mut json: serde_json::Value =
+            serde_json::from_str(&island_props("Workshop").script_json()).unwrap();
+        json.as_object_mut().unwrap().remove("picker");
+        let props: LinkFormIslandProps = serde_json::from_value(json).unwrap();
+        assert_eq!(props.picker, RepositoryPicker::default());
+        assert_eq!((props.picker.page, props.picker.pages), (1, 1));
+    }
+
+    #[test]
+    fn picker_query_is_one_bounded_line_matched_case_insensitively() {
+        assert_eq!(RepositoryPicker::normalize_query("api\r\nweb"), "apiweb");
+        assert_eq!(
+            RepositoryPicker::normalize_query(&"é".repeat(150))
+                .chars()
+                .count(),
+            REPOSITORY_QUERY_MAX_CHARS
+        );
+        assert!(RepositoryPicker::matches_query("", "acme/api"));
+        assert!(RepositoryPicker::matches_query("  ACME/A ", "acme/api"));
+        assert!(RepositoryPicker::matches_query("pi", "Acme/API"));
+        assert!(!RepositoryPicker::matches_query("web", "acme/api"));
     }
 
     #[test]

@@ -165,6 +165,12 @@ async function post(page) {
   const entries = new URLSearchParams((await response.json()).entries);
   expect(entries.getAll('csrf_token')).toEqual([csrfToken]);
   entries.delete('csrf_token'); // Remaining assertions describe domain form values.
+  // The repository picker's filter and page ride along with every POST; they
+  // steer which repositories a re-rendered form lists, not the link.
+  for (const key of ['repo_query', 'repo_page']) {
+    expect(entries.getAll(key).length).toBeLessThanOrEqual(1);
+    entries.delete(key);
+  }
   return entries;
 }
 
@@ -400,7 +406,8 @@ for (const [path, raw] of [['/permission-invalid', 'owner'], ['/permission-empty
     const posts = [];
     page.on('request', (request) => { if (request.method() === 'POST') posts.push(request.url()); });
     const props = JSON.parse(await page.locator('#link-form-props').textContent());
-    expect(props.values.repo_grants).toEqual([`10:${raw}`]);
+    // The raw grant of the selected repository; the others start at pull.
+    expect(props.values.repo_grants).toEqual([`10:${raw}`, '11:pull', '12:pull']);
     await expectGrant(page, 'pull', true);
     expect(await form(page).evaluate((element) => element.checkValidity())).toBe(true);
     await submit(page).click();
@@ -749,6 +756,7 @@ test('delayed bundle keeps every guardrail changed before the island mounts', as
   await page.locator('#expires_in_days').fill('45');
   await page.getByRole('checkbox', { name: 'acme/api', exact: true }).check();
   await page.getByRole('checkbox', { name: 'acme/docs', exact: true }).check();
+  await page.getByLabel('Find repositories', { exact: true }).fill('docs');
   release();
   await expectMounted(page);
 
@@ -758,6 +766,8 @@ test('delayed bundle keeps every guardrail changed before the island mounts', as
   expect(props.values.description).toBe('');
   expect(props.values.approval_required).toBe(false);
   expect(props.values.selected_repo_ids).toEqual([]);
+  expect(props.picker.query).toBe('');
+  await expect(page.getByLabel('Find repositories', { exact: true })).toHaveValue('docs');
 
   await expect(form(page)).toHaveCount(1);
   await expect(page.locator('#description')).toHaveValue('Cold cache workshop');
@@ -992,7 +1002,12 @@ test('responsive themed form keeps controls reachable and accessibility wiring i
       `${selector} must not overflow horizontally`).toBeLessThanOrEqual(1);
   }
   await page.getByText('Exact expiration and lifetime', { exact: true }).click();
-  for (const control of await form(page).locator('input:not([type="hidden"]), textarea, select, button[type="submit"]').all()) {
+  // The form's default button only receives Enter's implicit submission; it
+  // is visually hidden and out of the tab order on purpose.
+  const defaultButton = form(page).locator('button[name="repo_search"][aria-hidden="true"]');
+  await expect(defaultButton).toHaveAttribute('tabindex', '-1');
+  await expect(defaultButton).toHaveClass('sr-only');
+  for (const control of await form(page).locator('input:not([type="hidden"]), textarea, select, button[type="submit"]:not([aria-hidden="true"])').all()) {
     await control.scrollIntoViewIfNeeded();
     await expect(control).toBeInViewport();
     await expect(control).toHaveAccessibleName(/\S/);
@@ -1056,6 +1071,47 @@ test('explicit heterogeneous grants survive delayed mount and set-all changes on
   const data = await post(page);
   expect(data.getAll('repo_ids')).toEqual(['10', '11']);
   expect(data.getAll('repo_grants')).toEqual(['10:triage', '11:maintain', '12:pull']);
+});
+
+// The picker's buttons ask the server to re-render the form with another page
+// of repositories, so the island lets them POST natively even while a blocker
+// (here the empty description) would stop "Create invitation link".
+async function pickerPost(page, act) {
+  const responsePromise = page.waitForResponse((response) =>
+    new URL(response.url()).pathname === action && response.request().method() === 'POST');
+  await act();
+  const response = await responsePromise;
+  expect(response.request().isNavigationRequest()).toBe(true);
+  return new URLSearchParams((await response.json()).entries);
+}
+
+test('picker search is a native POST the island never blocks', async ({ page }) => {
+  await open(page);
+  await page.getByRole('checkbox', { name: 'acme/web', exact: true }).check();
+  await page.getByLabel('Find repositories', { exact: true }).fill('docs');
+  const data = await pickerPost(page, () => page.getByRole('button', { name: 'Search', exact: true }).click());
+  expect(data.getAll('repo_search')).toEqual(['true']);
+  expect(data.get('repo_query')).toBe('docs');
+  expect(data.get('repo_page')).toBe('1');
+  expect(data.get('description')).toBe('');
+  expect(data.getAll('repo_ids')).toEqual(['11']);
+});
+
+test('Enter searches from the repository filter and does nothing in other fields', async ({ page }) => {
+  await open(page);
+  await page.locator('#permission').selectOption('admin');
+  await page.locator('#description').fill('Typed');
+  await page.locator('#description').press('Enter');
+  // Not a submission, and not the set-all helper either.
+  await page.getByRole('checkbox', { name: 'acme/api', exact: true }).check();
+  await expect(page.locator('#description')).toHaveValue('Typed');
+  for (const id of [10, 11, 12]) await expect(page.locator(`#repo-grant-${id}`)).toHaveValue(`${id}:pull`);
+  await page.getByLabel('Find repositories', { exact: true }).fill('api');
+  const data = await pickerPost(page, () => page.getByLabel('Find repositories', { exact: true }).press('Enter'));
+  expect(data.getAll('repo_search')).toEqual(['true']);
+  expect(data.has('apply_all')).toBe(false);
+  expect(data.get('repo_query')).toBe('api');
+  expect(data.getAll('repo_grants')).toEqual(['10:pull', '11:pull', '12:pull']);
 });
 
 test('set-all helper explicitly updates every offered grant without selecting repositories', async ({ page }) => {

@@ -19,7 +19,7 @@ use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
 use ghinvite_island::LinkFormIsland;
 use ghinvite_ui::link_form::{
-    self, LinkFormErrors, LinkFormIslandProps, LinkFormValues, RepositoryChoice,
+    self, LinkFormErrors, LinkFormIslandProps, LinkFormValues, RepositoryChoice, RepositoryPicker,
 };
 use ghinvite_ui::links::LinkCreateForm;
 
@@ -609,6 +609,59 @@ fn island_renders_the_expected_error_state_not_just_the_same_string() {
     assert_eq!(island.matches("<form").count(), 1);
 }
 
+/// A filtered middle page with a selection pinned from elsewhere: the filter,
+/// the pinned and page captions and both page buttons render identically.
+#[test]
+fn paged_repository_picker_has_ssr_island_parity() {
+    let picker = RepositoryPicker {
+        query: "acme".into(),
+        page: 2,
+        pages: 3,
+        matches: 120,
+        pinned: 1,
+        ..RepositoryPicker::default()
+    };
+    let values = LinkFormValues {
+        description: "Workshop".into(),
+        selected_repo_ids: vec![12, 11],
+        repo_grants: vec!["12:push".into(), "10:pull".into(), "11:triage".into()],
+        ..LinkFormValues::default()
+    };
+    let repos = vec![
+        acme_repos()[2].clone(),
+        acme_repos()[0].clone(),
+        acme_repos()[1].clone(),
+    ];
+    let (server_values, server_repos, server_picker) =
+        (values.clone(), repos.clone(), picker.clone());
+    let server = render(move || {
+        rsx! {
+            LinkCreateForm {
+                action: ACTION.to_string(),
+                form: server_values.clone(),
+                repos: server_repos.clone(),
+                picker: server_picker.clone(),
+            }
+        }
+    });
+    let island = render(move || {
+        rsx! {
+            LinkFormIsland {
+                eligibility: Default::default(),
+                action: ACTION.to_string(),
+                values: values.clone(),
+                repos: repos.clone(),
+                picker: picker.clone(),
+                now: now(),
+            }
+        }
+    });
+    assert_eq!(island, server);
+    assert!(server.contains("Selected, not on this page"));
+    assert!(server.contains("value=\"acme\""));
+    assert!(server.contains("Page 2 of 3"));
+}
+
 #[test]
 fn island_props_from_the_page_blob_round_trip_into_the_component() {
     // The entrypoint deserialises the page's JSON block into
@@ -622,6 +675,7 @@ fn island_props_from_the_page_blob_round_trip_into_the_component() {
         action: ACTION.to_string(),
         values: failed_submission(),
         repos: acme_repos(),
+        picker: Default::default(),
         now: now(),
     };
     let json = props.script_json();

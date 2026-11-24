@@ -170,7 +170,7 @@
     if (!form.matches('form[data-repository-authority]')) return;
     // These native POSTs only redisplay the form; the server never dispatches
     // creation for them. They must remain usable while authority is unavailable.
-    if (event.submitter && ['apply_all', 'reload_repos'].includes(event.submitter.name)) return;
+    if (event.submitter && ['apply_all', 'reload_repos', 'repo_search', 'repo_goto'].includes(event.submitter.name)) return;
     var blocked = Array.from(form.querySelectorAll('input[name="repo_ids"]:checked')).find(function (box) {
       var observation = observations.get(box);
       if (!observation) check(box);

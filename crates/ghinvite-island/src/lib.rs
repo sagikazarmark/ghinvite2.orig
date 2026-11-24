@@ -26,7 +26,11 @@
 //!   A fresh core preflight retires the rejection and allows an unchanged retry
 //!   of server-only errors when client/native validation passes. `ParseBlocked`
 //!   returns before core preflight and retains the rejection until a later
-//!   submit can reach it.
+//!   submit can reach it;
+//! - the repository picker's buttons (Search, Previous/Next page) stay native
+//!   POSTs that only re-render the form on the server, so they skip that
+//!   preflight ([`PickerSubmit`]); the island never filters repositories
+//!   itself, and its props carry only the page the server listed.
 //!
 //! Raw restoration is not gated on the server having rejected anything: the
 //! takeover adopts what the admin typed before the island mounted, so a `0` on
@@ -54,6 +58,55 @@ use ghinvite_ui::link_form::{
     parse_invitation_lifetime_hours, parse_max_uses, register_target_validators,
 };
 use ghinvite_ui::links::{LinkCreateForm, LinkFormHandlers, RepositoryScopeHandlers};
+use std::cell::Cell;
+use std::rc::Rc;
+
+/// Which native POSTs the island lets through without its submit preflight.
+///
+/// The repository picker's buttons submit the create form so the server can
+/// re-render it with another page of repositories; a blocker elsewhere in the
+/// form (an empty description, say) must not stop the admin from searching.
+/// The form's default button is a search too, but Enter only searches from
+/// the repository filter: pressed in another field it does nothing, rather
+/// than reloading the page the admin is filling in.
+///
+/// Clicks fire before the submit they cause, so the click handlers arm the
+/// pass and the submit handler spends it.
+#[derive(Clone, Default)]
+pub struct PickerSubmit {
+    helper: Rc<Cell<bool>>,
+    enter_in_query: Rc<Cell<bool>>,
+}
+
+impl PickerSubmit {
+    /// A picker button was clicked: its submit goes through natively.
+    pub fn helper_clicked(&self) {
+        self.helper.set(true);
+    }
+
+    /// A key went down in the repository filter.
+    pub fn query_key(&self, enter: bool) {
+        self.enter_in_query.set(enter);
+    }
+
+    /// The default button was clicked by Enter's implicit submission. Returns
+    /// whether that submission may go ahead: only when Enter was pressed in
+    /// the repository filter, which then searches like its button.
+    pub fn default_clicked(&self) -> bool {
+        let search = self.enter_in_query.replace(false);
+        if search {
+            self.helper.set(true);
+        }
+        search
+    }
+
+    /// Spend the pass for the submission now under way, if a picker button
+    /// caused it.
+    pub fn take(&self) -> bool {
+        self.enter_in_query.set(false);
+        self.helper.replace(false)
+    }
+}
 
 /// The reactive new invitation link form.
 ///
@@ -140,11 +193,35 @@ pub fn LinkFormIsland(props: LinkFormIslandProps) -> Element {
         let repo_grants = repo_grants.clone();
         let offered_repos = props.repos.clone();
         let helper_permission = permission.clone();
+        let picker = PickerSubmit::default();
         use_hook(move || LinkFormHandlers {
-            onsubmit: Some(EventHandler::new(move |event: FormEvent| {
-                // Allowed → the browser POSTs natively; Blocked → dioform has
-                // already cancelled the event and made the errors visible.
-                let _ = submit.on_submit(event);
+            onsubmit: Some(EventHandler::new({
+                let picker = picker.clone();
+                move |event: FormEvent| {
+                    // A picker button only asks the server for another page.
+                    if picker.take() {
+                        return;
+                    }
+                    // Allowed → the browser POSTs natively; Blocked → dioform
+                    // has already cancelled the event and made the errors
+                    // visible.
+                    let _ = submit.on_submit(event);
+                }
+            })),
+            picker_submit: Some(EventHandler::new({
+                let picker = picker.clone();
+                move |_event: MouseEvent| picker.helper_clicked()
+            })),
+            default_submit: Some(EventHandler::new({
+                let picker = picker.clone();
+                move |event: MouseEvent| {
+                    if !picker.default_clicked() {
+                        event.prevent_default();
+                    }
+                }
+            })),
+            picker_query_keydown: Some(EventHandler::new(move |event: KeyboardEvent| {
+                picker.query_key(event.key() == Key::Enter);
             })),
             email_domains: Some(commit_on_focus_exit(email_domains.into())),
             description: Some(commit_on_focus_exit(description.into())),
@@ -306,6 +383,7 @@ pub fn LinkFormIsland(props: LinkFormIslandProps) -> Element {
             action: browser.action().to_string(),
             form: values,
             repos: props.repos.clone(),
+            picker: props.picker.clone(),
             organization: props.organization.clone(),
             eligibility: props.eligibility.clone(),
             handlers: handlers,
@@ -506,6 +584,7 @@ mod tests {
                 id: 10,
                 full_name: "acme/api".into(),
             }],
+            picker: Default::default(),
             now: "2026-05-04T12:00:00Z".parse().unwrap(),
         };
         let checked = Rc::new(Cell::new(false));
@@ -689,6 +768,37 @@ mod tests {
             assert!(form.parse_errors().is_empty());
             assert!(form.visible_validation_errors().is_empty());
         });
+    }
+
+    #[test]
+    fn picker_buttons_pass_one_submission_and_enter_searches_only_from_the_filter() {
+        let picker = PickerSubmit::default();
+        // An ordinary submit runs the preflight.
+        assert!(!picker.take());
+
+        // Search, Previous or Next: that one submission goes through.
+        picker.helper_clicked();
+        assert!(picker.take());
+        assert!(!picker.take(), "the pass is spent");
+
+        // Enter in the filter clicks the default button, which searches.
+        picker.query_key(true);
+        assert!(picker.default_clicked());
+        assert!(picker.take());
+
+        // Enter anywhere else is not a search, and not a submission.
+        assert!(!picker.default_clicked());
+        assert!(!picker.take());
+
+        // Typing in the filter and then pressing Enter elsewhere is not one.
+        picker.query_key(true);
+        picker.query_key(false);
+        assert!(!picker.default_clicked());
+
+        // An armed filter key never outlives the submission that followed.
+        picker.query_key(true);
+        assert!(!picker.take());
+        assert!(!picker.default_clicked());
     }
 
     #[test]

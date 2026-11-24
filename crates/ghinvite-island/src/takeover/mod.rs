@@ -62,7 +62,7 @@ pub use browser::{CaretDirection, ControlText, FocusRestore, FocusTarget, Select
 use browser::Sanitiser;
 use dioform::advanced::FieldIdentity;
 use dioform::prelude::Form;
-use ghinvite_ui::link_form::{CreateLinkForm, LinkFormValues};
+use ghinvite_ui::link_form::{CreateLinkForm, LinkFormValues, RepositoryPicker};
 
 /// The sanitiser of the control the server renders for `field`.
 ///
@@ -94,6 +94,10 @@ fn sanitiser_for(field: &FieldIdentity) -> Sanitiser {
     }
 }
 
+/// The sanitiser of the repository picker's filter, an `<input type="search">`.
+/// It is not a field of the model, so [`sanitiser_for`] does not know it.
+const QUERY_SANITISER: Sanitiser = Sanitiser::Line;
+
 /// Every control of the server-rendered form, read from the live DOM just
 /// before the island replaces it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -123,6 +127,9 @@ pub struct FormSnapshot {
     pub checked_repo_ids: Vec<u64>,
     /// Repository ids the server rendered as checked, in DOM order.
     pub default_repo_ids: Vec<u64>,
+    /// The repository picker's filter; absent (empty) when the server
+    /// rendered none.
+    pub repo_query: ControlText,
 }
 
 /// The values the island should mount with: `values` from the props blob, with
@@ -247,6 +254,17 @@ pub fn adopt(values: &LinkFormValues, dom: &FormSnapshot) -> LinkFormValues {
     adopted
 }
 
+/// The picker the island should mount with: `picker` from the props blob,
+/// with a filter the admin already retyped taken from `dom`. The listed page
+/// stays the server's; the new filter applies when they search.
+pub fn adopt_picker(picker: &RepositoryPicker, dom: &FormSnapshot) -> RepositoryPicker {
+    let mut adopted = picker.clone();
+    if dom.repo_query.edited(QUERY_SANITISER) {
+        adopted.query = dom.repo_query.value.clone();
+    }
+    adopted
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,7 +322,29 @@ mod tests {
             ),
             checked_repo_ids: values.selected_repo_ids.clone(),
             default_repo_ids: values.selected_repo_ids.clone(),
+            repo_query: ControlText::default(),
         }
+    }
+
+    #[test]
+    fn a_retyped_repository_filter_survives_takeover_and_the_page_stays_the_servers() {
+        let picker = RepositoryPicker {
+            query: "api".into(),
+            page: 2,
+            pages: 3,
+            matches: 120,
+            ..RepositoryPicker::default()
+        };
+        let values = LinkFormValues::default();
+        let mut dom = untouched(&values);
+        dom.repo_query = ControlText::new("api", "api");
+        assert_eq!(adopt_picker(&picker, &dom), picker);
+        dom.repo_query = ControlText::new("web", "api");
+        let adopted = adopt_picker(&picker, &dom);
+        assert_eq!(adopted.query, "web");
+        assert_eq!((adopted.page, adopted.pages, adopted.matches), (2, 3, 120));
+        // The filter is navigation, not a field: the values are untouched.
+        assert_eq!(adopt(&values, &dom), values);
     }
 
     fn rejected() -> LinkFormValues {
@@ -388,6 +428,7 @@ mod tests {
                 expires_in_days: ControlText::new("", "30"),
                 checked_repo_ids: vec![10, 12],
                 default_repo_ids: Vec::new(),
+                repo_query: ControlText::new("web", ""),
             },
         );
 
@@ -755,6 +796,7 @@ mod tests {
                     form: LinkFormValues::default(),
                     organization: ghinvite_ui::link_form::OrganizationOffer::Available(ghinvite_ui::link_form::OrganizationChoice {id:1,login:"acme".into(),teams:vec![ghinvite_ui::link_form::TeamChoice{id:7,slug:"learners".into(),name:"Learners".into(),externally_managed:false}]}),
                     repos: vec![RepositoryChoice { id: 10, full_name: "acme/api".into() }],
+                    picker: RepositoryPicker { query: "a".into(), page: 2, pages: 3, matches: 120, pinned: 1, ..RepositoryPicker::default() },
                 }
             }
         });
@@ -833,7 +875,7 @@ mod tests {
         for (element, kind, name) in rendered_controls() {
             let needed = match (element, kind.as_deref()) {
                 ("input", Some("hidden")) => continue,
-                ("input", None | Some("text")) => Sanitiser::Line,
+                ("input", None | Some("text") | Some("search")) => Sanitiser::Line,
                 ("input", Some("number")) => Sanitiser::Number,
                 ("input", Some("checkbox")) | ("select", None) => Sanitiser::Plain,
                 ("textarea", None) => Sanitiser::Text,
@@ -841,6 +883,11 @@ mod tests {
                 // in a browser before the takeover can adopt it.
                 other => panic!("{name} renders as {other:?}, which has no sanitiser"),
             };
+            if name == ghinvite_ui::link_form::REPO_QUERY_FIELD {
+                assert_eq!(QUERY_SANITISER, needed, "{name} renders as <{element}>");
+                seen.push(name);
+                continue;
+            }
             let (_, field) = by_name
                 .iter()
                 .find(|(field_name, _)| *field_name == name)
@@ -856,6 +903,10 @@ mod tests {
         for (name, _) in &by_name {
             assert!(seen.iter().any(|seen| seen == name), "{name} is rendered");
         }
+        assert!(
+            seen.iter()
+                .any(|seen| seen == ghinvite_ui::link_form::REPO_QUERY_FIELD)
+        );
     }
     #[test]
     fn target_grants_preserve_raw_rejection_and_adopt_only_deliberate_changes() {

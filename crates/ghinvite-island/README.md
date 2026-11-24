@@ -31,7 +31,8 @@ on `dioxus-web`. `ghinvite-ui` owns the markup and the shared form model
    `<div id="link-form-island">{form}</div>`, a
    `<script type="application/json" id="link-form-props">` block holding a
    serialised `LinkFormIslandProps` (`action`, the preserved `values` with
-   the server's errors, the available `repos`, the server's `now`), and
+   the server's errors, the listed `repos` — one picker page plus the selected
+   repositories outside it — the `picker` state, the server's `now`), and
    `<script type="module" src="/assets/ghinvite-island.js">`.
 2. `main` deserialises the blob, then **reads the live form and folds it over
    those props** (`takeover::adopt`). The bundle can land long after the page

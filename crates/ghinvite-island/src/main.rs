@@ -52,10 +52,11 @@ mod browser {
     use ghinvite_island::LinkFormIsland;
     use ghinvite_island::takeover::{
         CaretDirection, ControlText, FocusRestore, FocusTarget, FormSnapshot, Selection, adopt,
+        adopt_picker,
     };
     use ghinvite_ui::link_form::{
         CreateLinkForm, LINK_FORM_ISLAND_PROPS_ID, LINK_FORM_ISLAND_ROOT_ID, LinkFormIslandProps,
-        RepositoryChoice,
+        REPO_QUERY_FIELD, RepositoryChoice,
     };
     use std::cell::Cell;
     use std::rc::Rc;
@@ -104,6 +105,7 @@ mod browser {
             return;
         };
         props.values = adopt(&props.values, &live);
+        props.picker = adopt_picker(&props.picker, &live);
         let focus = read_focus(&document, &root);
 
         // See the module docs: dioxus-web appends, so remove the SSR form first.
@@ -186,6 +188,8 @@ mod browser {
             budget_share_pct: input(root, fields.budget_share_pct().field_name())?,
             checked_repo_ids: repo_ids_where(&checkboxes, |box_| box_.checked()),
             default_repo_ids: repo_ids_where(&checkboxes, |box_| box_.default_checked()),
+            // Not rendered for an installation without repositories.
+            repo_query: input(root, REPO_QUERY_FIELD).unwrap_or_default(),
         })
     }
 
@@ -315,7 +319,7 @@ mod browser {
                 return Some(Self::Area(area.clone()));
             }
             let input = element.dyn_ref::<web_sys::HtmlInputElement>()?;
-            (input.type_() == "text").then(|| Self::Text(input.clone()))
+            matches!(input.type_().as_str(), "text" | "search").then(|| Self::Text(input.clone()))
         }
 
         fn read(&self) -> Option<Selection> {
@@ -397,6 +401,7 @@ mod browser {
                 action: props.action,
                 values: props.values,
                 repos: props.repos,
+                picker: props.picker,
                 organization: props.organization,
                 eligibility: props.eligibility,
                 now: props.now,

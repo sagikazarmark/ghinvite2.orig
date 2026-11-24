@@ -79,7 +79,9 @@ pub(super) enum Sanitiser {
     /// A `<select>` or a checkbox: options and checkbox values are carried
     /// verbatim, so nothing rewrites them.
     Plain,
-    /// An `<input type="text">`, which strips CR and LF out of its value.
+    /// An `<input type="text">` or `type="search"`, which strip CR and LF out
+    /// of their value (the two share HTML's value sanitisation; checked in
+    /// Chromium 145 for both).
     ///
     /// A server that preserves a multiline value and rejects it would see that
     /// shortening read as an edit, submitting text the admin never wrote and

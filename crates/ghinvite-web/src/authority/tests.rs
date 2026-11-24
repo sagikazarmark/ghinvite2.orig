@@ -905,3 +905,5 @@ mod bulk;
 mod request_preview;
 
 mod golden;
+
+mod picker;

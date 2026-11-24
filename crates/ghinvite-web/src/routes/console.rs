@@ -1,6 +1,6 @@
 //! `/console/accounts/{login}/...` routes.
 
-use crate::forms::create_link::{self as create_link_form, CreateLinkSubmission};
+use crate::forms::create_link::{self as create_link_form, CreateLinkSubmission, PickerRequest};
 use crate::link_authority::AuthorityError;
 use crate::middleware::auth::{ConsoleAdminRejection, RequireConsoleAdminOf};
 use crate::middleware::csrf::{CsrfForm, EmptyForm};
@@ -15,7 +15,7 @@ use axum::routing::get;
 use chrono::Utc;
 use dioxus::prelude::*;
 use ghinvite_ui::link_edit::{self, LinkEditValues};
-use ghinvite_ui::link_form::{RepositoryChoice, missing_repository_notice};
+use ghinvite_ui::link_form::{RepositoryChoice, RepositoryPicker, missing_repository_notice};
 
 mod attempts;
 mod audit;
@@ -449,11 +449,9 @@ async fn new_link_form(
     admin: RequireConsoleAdminOf,
     axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let repos = repository_choices(
-        admin
-            .authority
-            .search_repositories(query.get("q").map(String::as_str).unwrap_or_default())
-            .await,
+    let picker = PickerRequest::new(
+        query.get("q").map(String::as_str).unwrap_or_default(),
+        query.get("page").map(String::as_str),
     );
     let flash = session::take_flash(&admin.tower).await.unwrap_or(None);
     let form = ghinvite_ui::links::LinkFormValues::default();
@@ -462,10 +460,11 @@ async fn new_link_form(
         &state,
         &admin,
         flash,
-        repos,
         form,
+        picker,
         Utc::now(),
         ghinvite_core::InvitationLinkId::new(),
+        None,
     )
     .await
 }
@@ -477,17 +476,33 @@ async fn new_link_form(
 /// serialised into the page's props blob): on a failed POST it is the same
 /// instant the server just validated with, so both sides agree. `link_id`
 /// and `now` form the creation identity a retried submission replays.
+///
+/// The repository scope lists the page of the installation's repositories
+/// that `picker` asks for, plus every selected repository the installation
+/// still exposes. `load_error` renders the scope as unavailable instead.
+#[allow(clippy::too_many_arguments)]
 async fn creation_form_response(
     state: &AppState,
     admin: &RequireConsoleAdminOf,
     flash: Option<session::Flash>,
-    repos: Result<Vec<RepositoryChoice>, RepositoryLoadError>,
     mut form: ghinvite_ui::links::LinkFormValues,
+    picker: PickerRequest,
     now: chrono::DateTime<Utc>,
     link_id: ghinvite_core::InvitationLinkId,
+    load_error: Option<RepositoryLoadError>,
 ) -> axum::response::Response {
-    if let Ok(available) = &repos
-        && let Some(message) = missing_repository_notice(&form.selected_repo_ids, available)
+    let window = match load_error {
+        Some(error) => Err(error),
+        None => repository_window(
+            admin
+                .authority
+                .repository_picker(&picker.query, picker.page, &form.selected_repo_ids)
+                .await,
+            &picker.query,
+        ),
+    };
+    if let Ok(window) = &window
+        && let Some(message) = missing_repository_notice(&form.selected_repo_ids, &window.selected)
     {
         if !form.errors.summary.contains(&message) {
             form.errors.summary.push(message);
@@ -495,7 +510,7 @@ async fn creation_form_response(
         // The warning makes the reduction explicit. The next submit confirms
         // the displayed scope; island props must match those native controls.
         form.selected_repo_ids
-            .retain(|id| available.iter().any(|repo| repo.id == *id));
+            .retain(|id| window.selected.iter().any(|repo| repo.id == *id));
     }
     let organization = admin
         .authority
@@ -505,16 +520,25 @@ async fn creation_form_response(
     let eligibility = eligibility_panel(state, admin).await;
     let signed_in_login = Some(admin.session.login.clone());
     let account_login = admin.account.account_login.clone();
-    let (status, repos, repository_error) = match repos {
-        Ok(repos) => (axum::http::StatusCode::OK, repos, None),
-        Err(error) => (error.status, vec![], Some(error.message.to_string())),
+    let (status, repos, picker, repository_error) = match window {
+        Ok(window) => (
+            axum::http::StatusCode::OK,
+            window.repos,
+            window.picker,
+            None,
+        ),
+        Err(error) => (
+            error.status,
+            vec![],
+            RepositoryPicker::default(),
+            Some(error.message.to_string()),
+        ),
     };
     let action = format!(
         "/console/accounts/{account_login}/links?link_id={link_id}&anchor={}",
         now.timestamp()
     );
 
-    let search_first = admin.authority.role() == crate::authority::Role::Delegated;
     let access_removal_enabled = state.config.access_removal_enabled;
     let html = render(admin.render_context(), move || {
         rsx! {
@@ -525,7 +549,7 @@ async fn creation_form_response(
                 flash: flash.clone(),
                 account_login: account_login.clone(),
                 repos: repos.clone(),
-                search_first,
+                picker: picker.clone(),
                 eligibility: eligibility.clone(),
                 organization: organization.clone(),
                 repository_error: repository_error.clone(),
@@ -600,24 +624,59 @@ fn repository_choices(
             message: "Repository access could not be checked. Try again in a minute.",
         })
 }
+/// The repository scope the create form offers for one picker page.
+struct PickerView {
+    /// Pinned selections from outside the page, then the page.
+    repos: Vec<RepositoryChoice>,
+    /// Every selected repository the installation still exposes.
+    selected: Vec<RepositoryChoice>,
+    picker: RepositoryPicker,
+}
+fn repository_window(
+    result: Result<crate::authority::RepositoryWindow, crate::authority::AuthorityError>,
+    query: &str,
+) -> Result<PickerView, RepositoryLoadError> {
+    let choice = |repo: ghinvite_core::storage::console_scope::RepoTarget| RepositoryChoice {
+        id: repo.id,
+        full_name: repo.full_name,
+    };
+    match result {
+        Ok(window) if !window.pending => {
+            let pinned: Vec<_> = window
+                .selected
+                .iter()
+                .filter(|repo| !window.listed.contains(repo))
+                .cloned()
+                .map(choice)
+                .collect();
+            let picker = RepositoryPicker {
+                query: query.to_owned(),
+                page: window.page,
+                pages: window.pages,
+                matches: window.matches,
+                pinned: pinned.len(),
+                search_required: window.search_required,
+                truncated: window.truncated,
+            };
+            Ok(PickerView {
+                repos: pinned
+                    .into_iter()
+                    .chain(window.listed.into_iter().map(choice))
+                    .collect(),
+                selected: window.selected.into_iter().map(choice).collect(),
+                picker,
+            })
+        }
+        _ => Err(RepositoryLoadError {
+            status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            message: "Repository access could not be checked. Try again in a minute.",
+        }),
+    }
+}
 async fn selected_repositories(
     admin: &RequireConsoleAdminOf,
     form: &CreateLinkSubmission,
 ) -> Result<Vec<RepositoryChoice>, RepositoryLoadError> {
-    if form.apply_all {
-        let offered: std::collections::BTreeSet<u64> = form
-            .repo_grants
-            .iter()
-            .filter_map(|value| value.split_once(':').and_then(|(id, _)| id.parse().ok()))
-            .chain(form.repo_ids.iter().copied())
-            .collect();
-        return repository_choices(
-            admin
-                .authority
-                .repositories_for_review(&offered.into_iter().collect::<Vec<_>>())
-                .await,
-        );
-    }
     if form.repo_ids.is_empty() {
         return repository_choices(admin.authority.repositories_for_review(&[]).await);
     }
@@ -696,29 +755,58 @@ async fn create_link(
         return crate::WebError::BadRequest("Invalid creation time.".into()).into_response();
     };
 
-    // Form helpers never dispatch or replay a business mutation.
-    if form.apply_all || form.reload_repos {
+    // Form helpers never dispatch or replay a business mutation. They only
+    // re-render the form; its repository page is loaded like any other.
+    let picker = form.picker_request();
+    if form.apply_all || form.reload_repos || form.is_picker_helper() {
         match attempts::pending_create(&state, &admin, link_id).await {
             Ok(Some(response)) => return response,
             Ok(None) => {}
             Err(error) => return error.into_response(),
         }
-    } else {
-        // Recover before present repository eligibility; expiry and repository names
-        // are canonical business input, not values to recompute on retry.
-        let recovery = attempts::recover_create(&state, &admin, link_id, &form, now).await;
-        match recovery {
-            Ok(attempts::CreateRecovery::Fresh) => {}
-            Ok(attempts::CreateRecovery::Answered(response)) => return response,
-            Ok(attempts::CreateRecovery::Rejected(rejected)) => {
-                let repos = selected_repositories(&admin, &form).await;
-                return rejected_creation_response(
-                    &state, &admin, repos, form, now, link_id, rejected,
-                )
-                .await;
+        let apply_all = form.apply_all;
+        let offered: std::collections::BTreeSet<u64> = form
+            .repo_grants
+            .iter()
+            .filter_map(|value| value.split_once(':').and_then(|(id, _)| id.parse().ok()))
+            .chain(form.repo_ids.iter().copied())
+            .collect();
+        let mut values = form.into_view_values(Default::default());
+        if apply_all {
+            if values
+                .permission
+                .parse::<ghinvite_core::Permission>()
+                .is_err()
+            {
+                values.errors.permission =
+                    Some(ghinvite_ui::link_form::PERMISSION_UNSUPPORTED.into());
+                values
+                    .errors
+                    .summary
+                    .push(ghinvite_ui::link_form::SUMMARY_MESSAGE.into());
+            } else {
+                // Every repository the form offered, as the island's set-all
+                // does. A grant names a repository; it never selects or
+                // authorizes one, and creation validates the selection anew.
+                values.repo_grants = offered
+                    .iter()
+                    .map(|id| format!("{id}:{}", values.permission))
+                    .collect();
             }
-            Err(e) => return e.into_response(),
         }
+        return creation_form_response(&state, &admin, None, values, picker, now, link_id, None)
+            .await;
+    }
+    // Recover before present repository eligibility; expiry and repository names
+    // are canonical business input, not values to recompute on retry.
+    let recovery = attempts::recover_create(&state, &admin, link_id, &form, now).await;
+    match recovery {
+        Ok(attempts::CreateRecovery::Fresh) => {}
+        Ok(attempts::CreateRecovery::Answered(response)) => return response,
+        Ok(attempts::CreateRecovery::Rejected(rejected)) => {
+            return rejected_creation_response(&state, &admin, form, now, link_id, rejected).await;
+        }
+        Err(e) => return e.into_response(),
     }
 
     // Loaded once, before validating: the validators need the available
@@ -736,46 +824,15 @@ async fn create_link(
                 &state,
                 &admin,
                 None,
-                Err(error),
                 form.into_view_values(Default::default()),
+                picker,
                 now,
                 link_id,
+                Some(error),
             )
             .await;
         }
     };
-    if form.apply_all {
-        let mut values = form.into_view_values(Default::default());
-        if values
-            .permission
-            .parse::<ghinvite_core::Permission>()
-            .is_err()
-        {
-            values.errors.permission = Some(ghinvite_ui::link_form::PERMISSION_UNSUPPORTED.into());
-            values
-                .errors
-                .summary
-                .push(ghinvite_ui::link_form::SUMMARY_MESSAGE.into());
-        } else {
-            values.repo_grants = repos
-                .iter()
-                .map(|repo| format!("{}:{}", repo.id, values.permission))
-                .collect();
-        }
-        return creation_form_response(&state, &admin, None, Ok(repos), values, now, link_id).await;
-    }
-    if form.reload_repos {
-        return creation_form_response(
-            &state,
-            &admin,
-            None,
-            Ok(repos),
-            form.into_view_values(Default::default()),
-            now,
-            link_id,
-        )
-        .await;
-    }
     let organization = admin
         .authority
         .organization_offer()
@@ -788,10 +845,11 @@ async fn create_link(
                 &state,
                 &admin,
                 None,
-                Ok(repos),
                 form.into_view_values(*errors),
+                picker,
                 now,
                 link_id,
+                None,
             )
             .await;
         }
@@ -809,10 +867,11 @@ async fn create_link(
             &state,
             &admin,
             None,
-            Ok(repos),
             form.into_view_values(errors),
+            picker,
             now,
             link_id,
+            None,
         )
         .await;
         *response.status_mut() = axum::http::StatusCode::SERVICE_UNAVAILABLE;
@@ -827,10 +886,11 @@ async fn create_link(
             &state,
             &admin,
             None,
-            Ok(repos),
             form.into_view_values(errors),
+            picker,
             now,
             link_id,
+            None,
         )
         .await;
     }
@@ -874,8 +934,7 @@ async fn create_link(
     {
         Ok(response) => response,
         Err(rejected) => {
-            rejected_creation_response(&state, &admin, Ok(repos), form, now, link_id, rejected)
-                .await
+            rejected_creation_response(&state, &admin, form, now, link_id, rejected).await
         }
     }
 }
@@ -886,12 +945,12 @@ async fn create_link(
 async fn rejected_creation_response(
     state: &AppState,
     admin: &RequireConsoleAdminOf,
-    repos: Result<Vec<RepositoryChoice>, RepositoryLoadError>,
     form: CreateLinkSubmission,
     now: chrono::DateTime<Utc>,
     link_id: ghinvite_core::InvitationLinkId,
     rejected: attempts::CreateRejected,
 ) -> axum::response::Response {
+    let picker = form.picker_request();
     let mut values = form.into_view_values(Default::default());
     use ghinvite_core::invitation_link::{CreateLinkError, GuardrailField};
     match rejected.refusal {
@@ -955,7 +1014,7 @@ async fn rejected_creation_response(
         (link_id, now)
     };
     let mut response =
-        creation_form_response(state, admin, None, repos, values, now, link_id).await;
+        creation_form_response(state, admin, None, values, picker, now, link_id, None).await;
     // A repository load failure keeps its own status.
     if response.status() == axum::http::StatusCode::OK {
         *response.status_mut() = axum::http::StatusCode::BAD_REQUEST;
@@ -986,19 +1045,8 @@ async fn duplicate_link(
     if let Err(error) = authorize_targets(&admin, &link.targets, false).await {
         return error.into_response();
     }
-    let repos = repository_choices(
-        admin
-            .authority
-            .repositories_for_review(
-                &link
-                    .targets
-                    .repos
-                    .iter()
-                    .map(|repo| repo.repo_id)
-                    .collect::<Vec<_>>(),
-            )
-            .await,
-    );
+    // The source's repositories are the selection, so the picker lists them
+    // wherever they are in the installation.
     let values = ghinvite_ui::links::LinkFormValues {
         email_domains: link
             .email_domains
@@ -1051,10 +1099,11 @@ async fn duplicate_link(
         &state,
         &admin,
         None,
-        repos,
         values,
+        PickerRequest::default(),
         Utc::now(),
         ghinvite_core::InvitationLinkId::new(),
+        None,
     )
     .await
 }

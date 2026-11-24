@@ -30,6 +30,9 @@ mod request_preview;
 
 const MAX_READS: usize = 50;
 const MAX_REPOSITORIES: usize = 5000;
+use ghinvite_ui::link_form::{
+    DELEGATED_SEARCH_LIMIT, REPOSITORY_PICKER_PAGE_SIZE, RepositoryPicker,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
@@ -67,6 +70,26 @@ pub struct ScopeResult {
 #[derive(Clone, Debug)]
 pub struct RepositoryChoices {
     pub repositories: Vec<RepoTarget>,
+    pub pending: bool,
+}
+/// One page of the create form's repository picker. Display evidence only:
+/// nothing here authorizes a selection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RepositoryWindow {
+    /// The submitted selection the installation still exposes, in
+    /// installation order. Unknown ids are dropped, never substituted.
+    pub selected: Vec<RepoTarget>,
+    /// This page's matches, in installation order.
+    pub listed: Vec<RepoTarget>,
+    /// Matches across every page.
+    pub matches: usize,
+    /// The 1-based page listed, clamped to `1..=pages`.
+    pub page: usize,
+    pub pages: usize,
+    /// A delegated caller must search before anything is listed.
+    pub search_required: bool,
+    /// A delegated search matched more than it may list.
+    pub truncated: bool,
     pub pending: bool,
 }
 #[derive(Default)]
@@ -628,12 +651,123 @@ impl AuthorityView {
         }
         Ok(choices)
     }
-    async fn installation_repositories(&self) -> Result<RepositoryChoices, AuthorityError> {
-        let Some(installation) = self.repo.as_ref().filter(|i| !unavailable(i)) else {
-            return Ok(RepositoryChoices {
-                repositories: vec![],
+    /// One page of the create form's repository picker: the installation's
+    /// repositories matching `query`, [`REPOSITORY_PICKER_PAGE_SIZE`] to a
+    /// page, plus the `selected` ones wherever they are.
+    ///
+    /// The filter runs over the cached installation listing, never GitHub's
+    /// search API. An unfiltered page whose selections it already holds reads
+    /// only the listing pages up to it, so opening the form costs one listing
+    /// read however large the installation is; a search, or a selection
+    /// beyond that prefix, reads (or reuses) the whole cached listing.
+    /// Delegated callers keep the search-first rule of
+    /// [`Self::search_repositories`]: nothing without a query, at most
+    /// [`DELEGATED_SEARCH_LIMIT`] matches, no paging and no permission reads.
+    pub async fn repository_picker(
+        &self,
+        query: &str,
+        page: usize,
+        selected: &[u64],
+    ) -> Result<RepositoryWindow, AuthorityError> {
+        let query = query.trim();
+        let delegated = self.role == Role::Delegated;
+        let wanted: BTreeSet<_> = selected.iter().copied().collect();
+        let page = page.max(1);
+        if delegated && query.is_empty() && wanted.is_empty() {
+            return Ok(RepositoryWindow {
+                selected: vec![],
+                listed: vec![],
+                matches: 0,
+                page: 1,
+                pages: 1,
+                search_required: true,
+                truncated: false,
                 pending: false,
             });
+        }
+        let prefix = (!delegated && query.is_empty())
+            .then(|| page.saturating_mul(REPOSITORY_PICKER_PAGE_SIZE));
+        let (mut choices, mut total) = self.installation_repository_listing(prefix).await?;
+        if prefix.is_some()
+            && !choices.pending
+            && choices.repositories.len() < total
+            && !wanted
+                .iter()
+                .all(|id| choices.repositories.iter().any(|repo| repo.id == *id))
+        {
+            (choices, total) = self.installation_repository_listing(None).await?;
+        }
+        let selected = choices
+            .repositories
+            .iter()
+            .filter(|repo| wanted.contains(&repo.id))
+            .cloned()
+            .collect();
+        let mut matches: Vec<_> = choices
+            .repositories
+            .into_iter()
+            .filter(|repo| RepositoryPicker::matches_query(query, &repo.full_name))
+            .collect();
+        if delegated {
+            let truncated = !query.is_empty() && matches.len() > DELEGATED_SEARCH_LIMIT;
+            if query.is_empty() {
+                matches.clear();
+            }
+            matches.truncate(DELEGATED_SEARCH_LIMIT);
+            return Ok(RepositoryWindow {
+                selected,
+                matches: matches.len(),
+                listed: matches,
+                page: 1,
+                pages: 1,
+                search_required: query.is_empty(),
+                truncated,
+                pending: choices.pending,
+            });
+        }
+        // A prefix holds the first pages only; GitHub's count says how many
+        // the unfiltered listing has in all.
+        let count = if prefix.is_some() {
+            total.max(matches.len())
+        } else {
+            matches.len()
+        };
+        let pages = count.div_ceil(REPOSITORY_PICKER_PAGE_SIZE).max(1);
+        let page = page.min(pages);
+        let listed = matches
+            .into_iter()
+            .skip((page - 1) * REPOSITORY_PICKER_PAGE_SIZE)
+            .take(REPOSITORY_PICKER_PAGE_SIZE)
+            .collect();
+        Ok(RepositoryWindow {
+            selected,
+            listed,
+            matches: count,
+            page,
+            pages,
+            search_required: false,
+            truncated: false,
+            pending: choices.pending,
+        })
+    }
+    async fn installation_repositories(&self) -> Result<RepositoryChoices, AuthorityError> {
+        Ok(self.installation_repository_listing(None).await?.0)
+    }
+    /// The installation's repositories with GitHub's total count. With a
+    /// `prefix`, the walk stops at the first listing page that reaches that
+    /// many repositories: a display prefix, never a complete selection.
+    async fn installation_repository_listing(
+        &self,
+        prefix: Option<usize>,
+    ) -> Result<(RepositoryChoices, usize), AuthorityError> {
+        let Some(installation) = self.repo.as_ref().filter(|i| !unavailable(i)) else {
+            return Ok((
+                RepositoryChoices {
+                    repositories: vec![],
+                    pending: false,
+                },
+                0,
+            ));
         };
         let mut cursor = None;
         let mut seen_cursors = Vec::new();
@@ -689,6 +823,15 @@ impl AuthorityView {
                 });
             }
             match page.next {
+                Some(_) if prefix.is_some_and(|prefix| all.len() >= prefix) => {
+                    return Ok((
+                        RepositoryChoices {
+                            repositories: all,
+                            pending: false,
+                        },
+                        usize::try_from(page.total_count).unwrap_or(usize::MAX),
+                    ));
+                }
                 Some(next) => {
                     if seen_cursors.contains(&next) {
                         return Err(AuthorityError::Unavailable);
@@ -707,10 +850,14 @@ impl AuthorityView {
         if cursor.is_some() && total != Some(all.len() as u64) && !pending {
             return Err(AuthorityError::Unavailable);
         }
-        Ok(RepositoryChoices {
-            repositories: all,
-            pending,
-        })
+        let total = all.len();
+        Ok((
+            RepositoryChoices {
+                repositories: all,
+                pending,
+            },
+            total,
+        ))
     }
     async fn reserve(&self, installation: &Installation) -> Result<(), AuthorityError> {
         {

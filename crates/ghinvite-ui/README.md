@@ -33,8 +33,12 @@ no Dioxus facade is pulled in). The module also owns:
   renders it in (`attach`), plus every user-facing message as a constant;
 - `LinkFormValues`, the form as the view renders it (submitted values verbatim
   plus `LinkFormErrors`), and `LinkFormIslandProps`, the JSON the page hands
-  the island (`action`, `values`, `repos`, the server's `now`). All three are
-  `Serialize`/`Deserialize`.
+  the island (`action`, `values`, `repos`, `picker`, the server's `now`). All
+  three are `Serialize`/`Deserialize`;
+- `RepositoryPicker`, which page of the installation's repositories the form
+  lists for which filter. The server filters and pages; `repos` holds only that
+  page plus the selected repositories outside it (`pinned`), so neither the
+  markup nor the props grow with the installation.
 
 The server (`ghinvite-web::forms::create_link`) runs it through
 `dioform_core::FormCore`; the browser island hands the same

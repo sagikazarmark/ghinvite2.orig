@@ -3023,7 +3023,11 @@ async fn create_link_failed_post_seeds_island_props_with_errors_and_preserved_va
     assert_eq!(props.values.expires_in_days, "45");
     assert_eq!(props.values.selected_repo_ids, vec![10]);
     assert!(props.values.errors.permission.is_none());
-    assert_eq!(props.values.repo_grants, vec!["999:owner", "10:owner"]);
+    // Submitted grants verbatim; the unselected acme/web starts at pull.
+    assert_eq!(
+        props.values.repo_grants,
+        vec!["999:owner", "10:owner", "11:pull"]
+    );
     assert!(props.values.errors.description.is_none());
     assert!(
         props
@@ -3490,10 +3494,14 @@ async fn create_link_malformed_target_grants_keep_raw_props_and_never_reach_comm
             .0;
         let props: ghinvite_ui::link_form::LinkFormIslandProps =
             serde_json::from_str(props).unwrap();
+        // The selected repository keeps exactly what was submitted; the
+        // unselected acme/web starts at pull.
         assert_eq!(
             props.values.repo_grants,
-            raw.map(|grant| vec![format!("10:{grant}")])
-                .unwrap_or_default()
+            raw.map(|grant| format!("10:{grant}"))
+                .into_iter()
+                .chain(["11:pull".to_string()])
+                .collect::<Vec<_>>()
         );
         assert_eq!(
             props.values.errors.repo_grants.as_deref(),
@@ -3565,7 +3573,9 @@ async fn create_link_tampered_target_grant_rerenders_form_with_grant_error() {
         .next()
         .unwrap();
     assert!(!form_markup.contains("owner"));
-    assert_eq!(text.matches("<option").count(), 10);
+    // The permission helper plus one grant select per listed repository: the
+    // failed form lists the picker's page again, not only the selection.
+    assert_eq!(text.matches("<option").count(), 15);
     // Every other submitted value and selection survives the re-render.
     assert_preserved_description_input(&text);
     assert!(text.contains("name=\"approval_required\" value=\"true\" checked"));
@@ -4091,3 +4101,6 @@ mod requester_message;
 
 #[path = "console_flow/requester_profile.rs"]
 mod requester_profile;
+
+#[path = "console_flow/repository_picker.rs"]
+mod repository_picker;

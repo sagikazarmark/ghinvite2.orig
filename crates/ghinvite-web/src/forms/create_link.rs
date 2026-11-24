@@ -57,9 +57,62 @@ pub struct CreateLinkSubmission {
     pub repo_ids: Vec<u64>,
     #[serde(default)]
     pub repo_grants: Vec<String>,
+    /// The repository picker's filter (`RepositoryPicker::query`).
+    #[serde(default)]
+    pub repo_query: Option<String>,
+    /// The picker page the form was showing.
+    #[serde(default)]
+    pub repo_page: Option<String>,
+    /// Submitted by the picker's Search button (and the form's default button).
+    #[serde(default)]
+    pub repo_search: bool,
+    /// Submitted by a picker page button: the page to show.
+    #[serde(default)]
+    pub repo_goto: Option<String>,
+}
+
+/// What the create form's repository picker is asked to list.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PickerRequest {
+    /// The filter, normalised by `RepositoryPicker::normalize_query`.
+    pub query: String,
+    /// The 1-based page; the authority clamps it to the pages that exist.
+    pub page: usize,
+}
+
+impl PickerRequest {
+    /// The request a raw filter and page describe. A missing, malformed or
+    /// zero page is the first one.
+    pub fn new(query: &str, page: Option<&str>) -> Self {
+        Self {
+            query: link_form::RepositoryPicker::normalize_query(query),
+            page: page
+                .and_then(|page| page.trim().parse::<usize>().ok())
+                .filter(|page| *page > 0)
+                .unwrap_or(1),
+        }
+    }
 }
 
 impl CreateLinkSubmission {
+    /// Whether a picker button (Search, a page) submitted the form: a helper
+    /// that only re-renders it, like the set-all and reload buttons.
+    pub fn is_picker_helper(&self) -> bool {
+        self.repo_search || self.repo_goto.is_some()
+    }
+
+    /// The picker page to render after this submission: the first page of a
+    /// new search, the page a page button asked for, or the page the form was
+    /// already showing.
+    pub fn picker_request(&self) -> PickerRequest {
+        let page = if self.repo_search {
+            None
+        } else {
+            self.repo_goto.as_deref().or(self.repo_page.as_deref())
+        };
+        PickerRequest::new(self.repo_query.as_deref().unwrap_or_default(), page)
+    }
+
     /// Parse the submission into the shared typed model.
     ///
     /// Omitted or blank expiration uses 14 days; only the explicit
@@ -328,6 +381,10 @@ mod tests {
             never_expires: None,
             reload_repos: false,
             apply_all: false,
+            repo_query: None,
+            repo_page: None,
+            repo_search: false,
+            repo_goto: None,
             description: Some("AI coding workshop".into()),
             permission: Some("push".into()),
             approval_required: Some("true".into()),
@@ -482,6 +539,43 @@ mod tests {
     }
 
     #[test]
+    fn picker_request_follows_the_button_that_submitted_the_form() {
+        let picker = |query: Option<&str>, page: Option<&str>, search: bool, goto: Option<&str>| {
+            CreateLinkSubmission {
+                repo_query: query.map(Into::into),
+                repo_page: page.map(Into::into),
+                repo_search: search,
+                repo_goto: goto.map(Into::into),
+                ..valid_form()
+            }
+        };
+        let request = |query: &str, page| PickerRequest {
+            query: query.into(),
+            page,
+        };
+        // Creating, or another helper, keeps the page that was shown.
+        let form = picker(Some("api"), Some("3"), false, None);
+        assert!(!form.is_picker_helper());
+        assert_eq!(form.picker_request(), request("api", 3));
+        // A page button wins over the page shown.
+        let form = picker(Some("api"), Some("3"), false, Some("4"));
+        assert!(form.is_picker_helper());
+        assert_eq!(form.picker_request(), request("api", 4));
+        // A search starts over on its first page.
+        let form = picker(Some("web\r\n"), Some("3"), true, None);
+        assert!(form.is_picker_helper());
+        assert_eq!(form.picker_request(), request("web", 1));
+        // Nothing usable is the first page, unfiltered.
+        for page in [None, Some(""), Some("0"), Some("-2"), Some("x")] {
+            assert_eq!(
+                picker(None, page, false, None).picker_request(),
+                request("", 1)
+            );
+        }
+        assert_eq!(valid_form().picker_request(), PickerRequest::new("", None));
+    }
+
+    #[test]
     fn description_is_trimmed_and_blank_note_and_unchecked_approval_normalize() {
         let form = CreateLinkSubmission {
             description: Some("  AI coding workshop  ".into()),
@@ -515,6 +609,10 @@ mod tests {
             never_expires: None,
             reload_repos: false,
             apply_all: false,
+            repo_query: None,
+            repo_page: None,
+            repo_search: false,
+            repo_goto: None,
             description: None,
             permission: None,
             approval_required: None,
