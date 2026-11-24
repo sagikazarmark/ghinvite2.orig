@@ -411,7 +411,8 @@
       },
       "body": {
         "documentation_url": "https://docs.github.com/rest",
-        "message": "Not Found"
+        "message": "Not Found",
+        "status": "404"
       }
     },
     {

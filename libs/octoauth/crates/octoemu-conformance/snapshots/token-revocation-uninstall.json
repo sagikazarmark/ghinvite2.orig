@@ -156,7 +156,8 @@
       },
       "body": {
         "documentation_url": "https://docs.github.com/rest",
-        "message": "Bad credentials"
+        "message": "Bad credentials",
+        "status": "401"
       }
     },
     {
@@ -170,7 +171,8 @@
       },
       "body": {
         "documentation_url": "https://docs.github.com/rest",
-        "message": "Not Found"
+        "message": "Not Found",
+        "status": "404"
       }
     },
     {
@@ -184,7 +186,8 @@
       },
       "body": {
         "documentation_url": "https://docs.github.com/rest/reference/apps#create-an-installation-access-token-for-an-app",
-        "message": "Not Found"
+        "message": "Not Found",
+        "status": "404"
       }
     }
   ]

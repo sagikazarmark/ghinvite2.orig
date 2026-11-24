@@ -14,7 +14,8 @@
       },
       "body": {
         "documentation_url": "https://docs.github.com/rest/collaborators/collaborators#add-a-repository-collaborator",
-        "message": "Inviting outside collaborators is restricted by organization policy."
+        "message": "Inviting outside collaborators is restricted by organization policy.",
+        "status": "403"
       }
     }
   ]

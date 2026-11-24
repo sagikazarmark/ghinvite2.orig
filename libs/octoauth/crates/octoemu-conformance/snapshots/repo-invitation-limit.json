@@ -153,7 +153,8 @@
             "resource": "Repository"
           }
         ],
-        "message": "Validation Failed"
+        "message": "Validation Failed",
+        "status": "422"
       }
     },
     {

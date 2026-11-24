@@ -26,6 +26,9 @@ Not yet published; developed inside the ghinvite repository.
   2 s (`revocation-propagates`), then the use after it. Right after the
   `DELETE` GitHub sometimes still accepts the token, so the old immediate
   use was a coin toss; re-recorded live.
+- The emulator-sourced snapshots are re-recorded now that octoemu's error
+  bodies carry `status` as GitHub's do; the live snapshots no longer list
+  `body.status` as unmodelled.
 
 ### Added
 

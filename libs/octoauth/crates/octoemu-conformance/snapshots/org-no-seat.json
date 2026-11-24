@@ -22,7 +22,8 @@
             "resource": "OrganizationInvitation"
           }
         ],
-        "message": "Validation Failed"
+        "message": "Validation Failed",
+        "status": "422"
       }
     }
   ]

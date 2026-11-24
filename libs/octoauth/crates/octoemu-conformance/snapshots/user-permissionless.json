@@ -59,7 +59,8 @@
       },
       "body": {
         "documentation_url": "https://docs.github.com/rest",
-        "message": "Resource not accessible by integration"
+        "message": "Resource not accessible by integration",
+        "status": "403"
       }
     },
     {
