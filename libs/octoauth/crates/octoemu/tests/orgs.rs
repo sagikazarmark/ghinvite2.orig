@@ -1333,6 +1333,7 @@ async fn spammed_invitation_writes_answer_422_spammed() {
         .await;
     assert_eq!(post.status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(post.body["errors"][0]["code"], "spammed");
+    assert_eq!(post.body["status"], "422");
     let delete = world.delete(&format!("/orgs/acme/invitations/{id}")).await;
     assert_eq!(delete.status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(delete.body["errors"][0]["code"], "spammed");

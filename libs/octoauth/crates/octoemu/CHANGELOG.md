@@ -239,6 +239,12 @@ compat`, `/__octoemu/compat/`) was never released and is gone (GE-09c).
     Request", "errors": "The version you specified…", "documentation_url":
     "https://docs.github.com/rest"}` (was `Unsupported API version
     <value>`).
+  - REST error bodies carry `status`, the HTTP status as a string
+    (`{"message", "documentation_url", "status": "404"}`), as every error
+    the live run recorded did; 422 `Validation Failed` and the 400 for an
+    unsupported API version too. The token endpoint's OAuth errors
+    (`error`, `error_description`, `error_uri`) and octoemu's own 501s are
+    unchanged. A test comparing a whole error body adds the field.
 - Seeded repository settings: `Repo::has_wiki`, `has_downloads` and
   `allow_forking` (default true, as before).
 - Response objects carry every field their OpenAPI schema requires, as the

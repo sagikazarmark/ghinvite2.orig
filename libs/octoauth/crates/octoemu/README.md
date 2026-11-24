@@ -558,7 +558,10 @@ response. The newest 10 000 records are kept.
 per-credential budget yet) and every response an `X-GitHub-Request-Id`. Lists
 are paged GitHub's way: `per_page` (default 30, silently capped at 100),
 `page`, and a `Link` header with `prev`, `next`, `last` and `first`. Errors use GitHub's
-`{"message", "documentation_url"}`; 422s add `errors[{resource, field, code}]`.
+`{"message", "documentation_url", "status"}`, `status` being the HTTP status as
+a string (`"404"`); 422s add `errors[{resource, field, code}]`. The web flow's
+token endpoint answers OAuth's `{"error", "error_description", "error_uri"}`
+instead.
 An `X-GitHub-Api-Version` other than `2022-11-28` or `2026-03-10` is a 400
 `Bad Request` whose `errors` names the value and the supported versions, on
 every REST route, before the credential (as GitHub answers; the docs

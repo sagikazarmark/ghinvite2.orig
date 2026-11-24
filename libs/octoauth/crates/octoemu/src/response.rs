@@ -46,11 +46,19 @@ pub(crate) fn json_with_link<T: Serialize + ?Sized>(
     response
 }
 
-/// GitHub's error body: `{"message", "documentation_url"}`.
+/// The HTTP status as GitHub repeats it in an error body's `status`: the
+/// code as a string (`"404"`; measured 2026-11-24 on every REST error the
+/// fidelity suite records).
+pub(crate) fn status_text(status: StatusCode) -> String {
+    status.as_u16().to_string()
+}
+
+/// GitHub's error body: `{"message", "documentation_url", "status"}`.
 #[derive(Debug, Serialize)]
 pub(crate) struct ErrorBody<'a> {
     pub(crate) message: &'a str,
     pub(crate) documentation_url: &'a str,
+    pub(crate) status: String,
 }
 
 /// A GitHub-style error.
@@ -60,6 +68,7 @@ pub(crate) fn error(status: StatusCode, message: &str, documentation_url: &str) 
         &ErrorBody {
             message,
             documentation_url,
+            status: status_text(status),
         },
     )
 }
@@ -76,13 +85,16 @@ pub(crate) struct FieldError {
     pub(crate) message: Option<String>,
 }
 
-/// A 422 `Validation Failed` with `errors`.
+/// A 422 `Validation Failed` with `errors`, and `status` as on every other
+/// error: the token route's measured 422s (its description names
+/// `validation-error`) carry it, and that schema leaves it open.
 pub(crate) fn validation_failed(errors: &[FieldError], documentation_url: &str) -> Response {
     #[derive(Serialize)]
     struct Body<'a> {
         message: &'static str,
         errors: &'a [FieldError],
         documentation_url: &'a str,
+        status: String,
     }
     json(
         StatusCode::UNPROCESSABLE_ENTITY,
@@ -90,6 +102,7 @@ pub(crate) fn validation_failed(errors: &[FieldError], documentation_url: &str) 
             message: "Validation Failed",
             errors,
             documentation_url,
+            status: status_text(StatusCode::UNPROCESSABLE_ENTITY),
         },
     )
 }
@@ -180,7 +193,7 @@ mod tests {
         assert_eq!(response.headers()[CONTENT_TYPE], JSON);
         assert_eq!(
             body(response).await,
-            serde_json::json!({"message": "Not Found", "documentation_url": REST_DOCS})
+            serde_json::json!({"message": "Not Found", "documentation_url": REST_DOCS, "status": "404"})
         );
 
         let response = validation_failed(
@@ -199,6 +212,7 @@ mod tests {
                 "message": "Validation Failed",
                 "errors": [{"resource": "Invitation", "field": "invitee_id", "code": "missing_field"}],
                 "documentation_url": REST_DOCS,
+                "status": "422",
             })
         );
     }

@@ -700,6 +700,7 @@ async fn an_unsupported_api_version_is_a_400_on_the_api_only() {
                      currently supported: \"2026-03-10\" (most recent) and \"2022-11-28\"."
                 ),
                 "documentation_url": "https://docs.github.com/rest",
+                "status": "400",
             })
         );
     }

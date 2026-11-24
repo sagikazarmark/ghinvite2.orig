@@ -131,6 +131,7 @@ fn api_version(shared: &crate::state::Shared, request: &Request) -> Option<Respo
             "message": "Bad Request",
             "errors": errors,
             "documentation_url": response::REST_DOCS,
+            "status": response::status_text(StatusCode::BAD_REQUEST),
         }),
     ))
 }

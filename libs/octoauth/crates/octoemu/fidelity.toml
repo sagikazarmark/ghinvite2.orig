@@ -118,9 +118,12 @@ doc = "https://docs.github.com/en/rest/using-the-rest-api/getting-started-with-t
 [behaviours.error-body]
 label = "documented"
 doc = "https://docs.github.com/en/rest/using-the-rest-api/troubleshooting-the-rest-api"
-# Errors are {"message", "documentation_url"}. GitHub also sends `status`, the
-# HTTP status as a string ("401"; measured 2026-11-24 on every error the
-# fidelity suite records); octoemu leaves it out.
+# Errors are {"message", "documentation_url", "status"}: `status` is the HTTP
+# status as a string ("401"; basic-error types it a string). Measured
+# 2026-11-24 on every REST error the fidelity suite records (400, 401, 403,
+# 404, 422), the token route's 422s (documented as validation-error, which
+# does not list the field) included, so 422 Validation Failed carries it
+# too. The web flow's token endpoint answers OAuth's {"error", ...} without it.
 
 [behaviours.validation-errors]
 label = "documented"

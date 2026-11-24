@@ -164,6 +164,7 @@ fn failure(shared: &Shared, failure: OrgFailure, docs: &str) -> Response {
                     "message": "Validation Failed",
                     "errors": [Spam { resource: INVITATION, code: "spammed" }],
                     "documentation_url": docs,
+                    "status": response::status_text(StatusCode::UNPROCESSABLE_ENTITY),
                 }),
             )
         }
