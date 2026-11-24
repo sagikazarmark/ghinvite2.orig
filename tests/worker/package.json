@@ -12,7 +12,7 @@
     "test:settlement": "SETTLEMENT_ONLY=1 npm run test:admission",
     "test:delivery": "APPROVED_DELIVERY_ONLY=1 npm run test:admission",
     "test:journey": "JOURNEY_ONLY=1 npm run test:admission",
-    "test:link-secret-fixture": "node --test capability-secrecy.test.mjs && node build.mjs && node build.mjs link-secret-fixture && node run-runtime.mjs link-secret-startup.mjs && node build.mjs workflows && node run-runtime.mjs delivery-run-startup.mjs && node build-octoemu.mjs && LINK_SECRET_FIXTURE=1 JOURNEY_ONLY=1 node run-runtime.mjs admission.mjs",
+    "test:link-secret-fixture": "node --test capability-secrecy.test.mjs && node build.mjs && node build.mjs link-secret-fixture && node build-octoemu.mjs && node run-runtime.mjs link-secret-startup.mjs && node build.mjs workflows && node run-runtime.mjs delivery-run-startup.mjs && LINK_SECRET_FIXTURE=1 JOURNEY_ONLY=1 node run-runtime.mjs admission.mjs",
     "test:installation": "timeout --kill-after=35s 1200s sh -ec 'node build.mjs workflows && node build-octoemu.mjs && INSTALLATION_ONLY=1 node run-runtime.mjs admission.mjs'",
     "test:storage": "node build.mjs workflows && node run-runtime.mjs storage-suite.mjs && node run-runtime.mjs workflow-startup.mjs",
     "test:startup": "node build.mjs && node build.mjs workflows && node run-runtime.mjs web-startup.mjs && node run-runtime.mjs workflow-startup.mjs",
