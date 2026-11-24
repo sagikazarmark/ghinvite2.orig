@@ -199,14 +199,19 @@ fn a_revoked_link_expires_an_overdue_request_and_leaves_a_decided_one() {
     assert_eq!(approved.cancel_for_revoked_link(now()), Ok(false));
     assert_eq!(approved, before);
 
-    let mut exhausted = pending(now() + Duration::days(1));
-    exhausted.revision = crate::storage::integer::MAX_EXACT;
-    let before = exhausted.clone();
-    assert_eq!(
-        exhausted.cancel_for_revoked_link(now()),
-        Err(RevisionExhausted)
-    );
-    assert_eq!(exhausted, before);
+    // At the revision limit neither cascade transition applies: not the
+    // cancellation, and not the expiry an overdue request would take.
+    for deadline in [now() + Duration::days(1), now()] {
+        let mut exhausted = pending(deadline);
+        exhausted.revision = crate::storage::integer::MAX_EXACT;
+        let before = exhausted.clone();
+        assert_eq!(
+            exhausted.cancel_for_revoked_link(now()),
+            Err(RevisionExhausted),
+            "deadline {deadline}"
+        );
+        assert_eq!(exhausted, before);
+    }
 }
 
 #[test]

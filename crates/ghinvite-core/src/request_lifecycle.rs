@@ -319,7 +319,8 @@ impl RequestSnapshot {
 
     /// A revoked link's cascade: a local cancellation of a pending request,
     /// never an admin's decline. An overdue one expires instead, and a request
-    /// that already left pending is unchanged. Answers whether it changed.
+    /// that already left pending is unchanged. Answers whether it changed; a
+    /// pending request whose revision is exhausted is refused, unchanged.
     pub fn cancel_for_revoked_link(
         &mut self,
         now: DateTime<Utc>,
@@ -327,14 +328,17 @@ impl RequestSnapshot {
         if self.state != RequestState::Pending {
             return Ok(false);
         }
-        if self.expire_due(now) {
-            return Ok(true);
-        }
-        self.revision = self
+        // Either transition takes the next revision, so check it first: at
+        // the limit the request is left unchanged.
+        let revision = self
             .revision
             .checked_add(1)
             .filter(|n| *n <= crate::storage::integer::MAX_EXACT)
             .ok_or(RevisionExhausted)?;
+        if self.expire_due(now) {
+            return Ok(true);
+        }
+        self.revision = revision;
         self.state = RequestState::Cancelled;
         self.decision = Some(TerminalDecision {
             decision_id: format!("request.cancelled/{}", self.request_id),
