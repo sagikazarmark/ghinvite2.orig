@@ -321,7 +321,7 @@ jobs:
         run: node tests/worker/run-runtime.mjs signin-cutover.mjs
       - name: Shared storage conformance on actual D1
         run: npm run test:storage --prefix tests/worker
-      - name: Scheduled daily delivery digest on actual Worker and D1
+      - name: Scheduled daily digest and sweep watchdog on actual Worker and D1
         run: node tests/worker/run-runtime.mjs daily-digest.mjs
       - name: Verify Worker/D1 installation failure and replacement recovery
         run: npm run test:installation --prefix tests/worker

@@ -1,4 +1,5 @@
-//! Native equivalent of the Worker's hourly retry opportunity for daily digests.
+//! Native equivalent of the Worker's hourly cron: daily digests, cleanup and
+//! the sweep watchdog (#86).
 use chrono::{DateTime, Duration, Timelike, Utc};
 use ghinvite_web::WebStorage;
 use std::sync::Arc;
@@ -52,17 +53,48 @@ pub async fn maintain_once(
     }
     result
 }
-pub async fn run(storage: Arc<dyn WebStorage>, emails: Arc<dyn EmailMaintenanceStorage>) {
+/// The hourly sweep watchdog (#86), when `GH_SWEEP_WATCHDOG_ENABLED` allows it.
+pub struct SweepWatchdog {
+    pub restate: Arc<ghinvite_web::restate_client::RestateClient>,
+    pub organization_enabled: bool,
+}
+
+pub async fn run(
+    storage: Arc<dyn WebStorage>,
+    emails: Arc<dyn EmailMaintenanceStorage>,
+    watchdog: Option<SweepWatchdog>,
+) {
     loop {
-        let wait = match maintain_once(storage.as_ref(), emails.as_ref(), Utc::now()).await {
-            Ok(()) => next_check(Utc::now()),
-            Err(_) => {
+        let now = Utc::now();
+        let digest = maintain_once(storage.as_ref(), emails.as_ref(), now).await;
+        if digest.is_err() {
+            tracing::warn!(
+                alert = "daily_delivery_digest_failed",
+                "Daily delivery summary unavailable"
+            );
+        }
+        // Independent of the digest, and safe to repeat after a failure.
+        let watchdog = match &watchdog {
+            Some(watchdog) => ghinvite_web::sweep_watchdog::check_and_record(
+                storage.as_ref(),
+                &watchdog.restate,
+                watchdog.organization_enabled,
+                now,
+            )
+            .await
+            .map(|_| ())
+            .inspect_err(|_| {
                 tracing::warn!(
-                    alert = "daily_delivery_digest_failed",
-                    "Daily delivery summary unavailable"
+                    alert = "sweep_watchdog_failed",
+                    "Sweep watchdog check unavailable"
                 );
-                std::time::Duration::from_secs(60)
-            }
+            }),
+            None => Ok(()),
+        };
+        let wait = if digest.is_ok() && watchdog.is_ok() {
+            next_check(Utc::now())
+        } else {
+            std::time::Duration::from_secs(60)
         };
         tokio::time::sleep(wait).await;
     }
@@ -105,6 +137,22 @@ mod email_maintenance_tests {
             Err(ghinvite_core::storage::Error::Database(
                 "test outage".into(),
             ))
+        }
+        async fn record_sweep_health(
+            &self,
+            _: DateTime<Utc>,
+            _: &ghinvite_core::sweep_health::WatchdogReport,
+        ) -> ghinvite_core::storage::Result<()> {
+            Err(ghinvite_core::storage::Error::Database(
+                "test outage".into(),
+            ))
+        }
+        async fn sweep_digest(
+            &self,
+            _: chrono::NaiveDate,
+        ) -> ghinvite_core::storage::Result<Option<ghinvite_core::storage::sweep_digest::SweepDigest>>
+        {
+            Ok(None)
         }
     }
     #[tokio::test]

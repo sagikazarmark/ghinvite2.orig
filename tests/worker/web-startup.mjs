@@ -22,6 +22,9 @@ const cases = [
   ['bulk email malformed ring',{P1_EMAIL_KEYRING:'SECRET_MARKER'},500],
   ['reissue enabled',{GH_REISSUE_ENABLED:'true'},200],
   ['reissue invalid',{GH_REISSUE_ENABLED:'SECRET_MARKER'},500],
+  ['sweep watchdog enabled',{GH_SWEEP_WATCHDOG_ENABLED:'true'},200],
+  ['sweep watchdog disabled',{GH_SWEEP_WATCHDOG_ENABLED:'false'},200],
+  ['sweep watchdog invalid',{GH_SWEEP_WATCHDOG_ENABLED:'SECRET_MARKER'},500],
 
   ['valid', {}, 200],
   ['malformed signin client ID',{GH_SIGNIN_CLIENT_ID:'SECRET_MARKER/invalid'},500],

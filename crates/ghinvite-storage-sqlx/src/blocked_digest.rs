@@ -5,6 +5,7 @@ use ghinvite_core::storage::{
     Result,
     blocked_digest::{self, BlockedDigest, DailyDigestStorage},
     console_scope::ConsoleScope,
+    sweep_digest,
 };
 #[async_trait]
 impl DailyDigestStorage for SqlxStorage {
@@ -34,6 +35,42 @@ impl DailyDigestStorage for SqlxStorage {
             .await
             .map_err(to_db_err)?;
         tx.commit().await.map_err(to_db_err)
+    }
+    async fn record_sweep_health(
+        &self,
+        now: DateTime<Utc>,
+        report: &ghinvite_core::sweep_health::WatchdogReport,
+    ) -> Result<()> {
+        let input = sweep_digest::record_parameters(now, report)?;
+        let mut tx = self.pool.begin().await.map_err(to_db_err)?;
+        sqlx::query(sweep_digest::RECORD)
+            .bind(&input.day)
+            .bind(&input.observed_at)
+            .bind(u64_to_i64(input.schedules)?)
+            .bind(u64_to_i64(input.rearmed)?)
+            .bind(u64_to_i64(input.unavailable)?)
+            .bind(&input.oldest_overdue_schedule)
+            .bind(&input.oldest_overdue_due_at)
+            .bind(u64_to_i64(input.failed_schedules)?)
+            .bind(&input.latest_failed_schedule)
+            .bind(&input.latest_failed_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(to_db_err)?;
+        sqlx::query(sweep_digest::CLEANUP)
+            .execute(&mut *tx)
+            .await
+            .map_err(to_db_err)?;
+        tx.commit().await.map_err(to_db_err)
+    }
+    async fn sweep_digest(&self, day: NaiveDate) -> Result<Option<sweep_digest::SweepDigest>> {
+        blocked_digest::validate_day(day)?;
+        let row = sqlx::query(sweep_digest::READ)
+            .bind(day.to_string())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(to_db_err)?;
+        sweep_digest::decode(row.as_ref().map(decode::<sweep_digest::Row>).transpose()?)
     }
 }
 impl SqlxStorage {

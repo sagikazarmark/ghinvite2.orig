@@ -9,6 +9,8 @@ const mf=new Miniflare({
   scriptPath:fileURLToPath(new URL('./worker.mjs',import.meta.url)),
   modulesRules:[{type:'CompiledWasm',include:['**/*.wasm']}],
   compatibilityDate:'2024-09-23',compatibilityFlags:['nodejs_compat'],d1Databases:{DB:'email-maintenance'},
+  // Projection-only maintenance; daily-digest.mjs covers the sweep watchdog.
+  bindings:{GH_SWEEP_WATCHDOG_ENABLED:'false'},
   outboundService(){outbound++;throw new Error('maintenance has no network effects');},
   handleRuntimeStdio(stdout,stderr){for(const stream of [stdout,stderr])stream.on('data',chunk=>{if(Buffer.byteLength(logs)+chunk.length>1024*1024)overflow=true;else logs+=chunk.toString();});},
 });

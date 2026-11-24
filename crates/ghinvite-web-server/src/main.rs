@@ -89,6 +89,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
     let digest_storage = storage.clone();
+    let watchdog =
+        config
+            .sweep_watchdog_enabled
+            .then(|| ghinvite_web_server::daily_digest::SweepWatchdog {
+                restate: restate.clone(),
+                organization_enabled: config.organization_delivery_enabled,
+            });
     let email_storage = storage.clone();
     let state = AppState::new(storage, github, restate, config)
         .with_authority_cache(Arc::new(
@@ -120,6 +127,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let digest_task = tokio::spawn(ghinvite_web_server::daily_digest::run(
         digest_storage,
         email_storage,
+        watchdog,
     ));
     let result = axum::serve(
         listener,

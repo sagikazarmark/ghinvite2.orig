@@ -33,6 +33,7 @@ pub mod session;
 pub mod session_store;
 pub mod signin;
 pub mod state;
+pub mod sweep_watchdog;
 pub mod wasm_compat;
 mod webhook_events;
 

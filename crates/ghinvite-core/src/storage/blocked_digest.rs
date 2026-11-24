@@ -25,6 +25,17 @@ pub trait DailyDigestStorage: Send + Sync + 'static {
     /// The first successful snapshot in a UTC day wins. Older calls cannot
     /// backfill or regress the retained seven-day window. No external effects.
     async fn record_blocked_digest(&self, now: DateTime<Utc>) -> Result<()>;
+    /// Fold one complete sweep watchdog check into its UTC day (#86). A check
+    /// dated before the newest recorded day is ignored; seven days are kept.
+    async fn record_sweep_health(
+        &self,
+        now: DateTime<Utc>,
+        report: &crate::sweep_health::WatchdogReport,
+    ) -> Result<()>;
+    async fn sweep_digest(
+        &self,
+        day: NaiveDate,
+    ) -> Result<Option<super::sweep_digest::SweepDigest>>;
 }
 /// Validated values for ordinary positional SQL bindings (ADR 0005).
 pub struct RecordParameters {

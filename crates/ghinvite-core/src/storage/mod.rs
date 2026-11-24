@@ -48,6 +48,7 @@ pub mod projection;
 pub mod request_history;
 pub mod settlement;
 pub mod signin_budget;
+pub mod sweep_digest;
 pub mod users;
 pub use audit_read::{AUDIT_PAGE_SIZE, AuditBoundary, AuditPage, AuditPosition};
 

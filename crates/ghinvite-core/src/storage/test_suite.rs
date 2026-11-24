@@ -232,6 +232,8 @@ mod link_pause_tests;
 pub use link_pause_tests::scenario_link_pause;
 mod blocked_digest_tests;
 pub use blocked_digest_tests::scenario_blocked_digest;
+mod sweep_digest;
+pub use sweep_digest::scenario_sweep_digest;
 mod organization_telemetry;
 pub use organization_telemetry::scenario_organization_telemetry;
 mod operational_tests;
@@ -285,6 +287,7 @@ scenarios![
     scenario_revoke_receipt,
     scenario_link_pause,
     scenario_blocked_digest,
+    scenario_sweep_digest,
     scenario_invite_budget_projection,
     scenario_repository_telemetry,
     scenario_organization_telemetry,

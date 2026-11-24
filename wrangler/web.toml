@@ -9,6 +9,7 @@ compatibility_flags = ["nodejs_compat"]
 
 [triggers]
 # First successful run records the UTC daily summary; hourly retries recover outages.
+# With GH_SWEEP_WATCHDOG_ENABLED it also re-arms missing/overdue sweep chains (#86).
 crons = ["5 * * * *"]
 
 [build]
@@ -60,6 +61,8 @@ P1_APP_STAGE = "repo"
 # builds refuse them (runtime-tests harness builds only; docs/deploy.md).
 # Matched web/workflow capability. Keep off until AccessGrant acceptance gates pass.
 GH_ACCESS_REMOVAL_ENABLED = "false"
+# Hourly sweep watchdog (#86; docs/deploy.md). Production enablement is #61.
+GH_SWEEP_WATCHDOG_ENABLED = "false"
 P1_HOST                    = "ghinvite.workers.dev"
 RESTATE_INGRESS_URL    = "https://ACCOUNT_ID.restate.cloud"
 GHINVITE_GITHUB_INSTALL_URL = "https://github.com/apps/YOUR_APP_NAME/installations/new"

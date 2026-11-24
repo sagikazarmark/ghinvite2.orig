@@ -35,6 +35,9 @@ pub struct WebConfig {
     pub signin_apps: Option<Arc<apps::SignInApp>>,
     pub organization_delivery_enabled: bool,
     pub access_removal_enabled: bool,
+    /// The hourly cron re-arms missing or overdue sweep chains (#86): on for
+    /// development roots, off in production until `GH_SWEEP_WATCHDOG_ENABLED`.
+    pub sweep_watchdog_enabled: bool,
     /// Base URL of THIS web binary (e.g. `https://ghinvite.example`). Used to
     /// build the OAuth redirect URI and absolute URLs in the home page.
     pub base_url: String,
@@ -116,6 +119,10 @@ impl WebConfig {
             access_removal_enabled: apps::access_removal_enabled(
                 read("GH_ACCESS_REMOVAL_ENABLED").as_deref(),
             )?,
+            sweep_watchdog_enabled: ghinvite_config::sweep::watchdog_enabled(
+                deployment,
+                read(ghinvite_config::sweep::WATCHDOG_FIELD).as_deref(),
+            )?,
             github_apps: parsed.installed,
             github: parsed.github,
             webhooks: Some(Arc::new(parsed.webhooks)),
@@ -165,6 +172,10 @@ impl WebConfig {
             ghinvite_config::bulk::enabled(optional_env("GH_BULK_ENABLED")?.as_deref())?;
         config.access_removal_enabled =
             apps::access_removal_enabled(optional_env("GH_ACCESS_REMOVAL_ENABLED")?.as_deref())?;
+        config.sweep_watchdog_enabled = ghinvite_config::sweep::watchdog_enabled(
+            apps::Deployment::Development,
+            optional_env(ghinvite_config::sweep::WATCHDOG_FIELD)?.as_deref(),
+        )?;
         config.github_org_install_url = optional_env("GH_ORG_APP_INSTALL_URL")?
             .map(|value| validate_org_install_url(&value).map(|()| value))
             .transpose()?;
@@ -196,6 +207,7 @@ impl WebConfig {
             github_org_install_url: None,
             organization_delivery_enabled: false,
             access_removal_enabled: false,
+            sweep_watchdog_enabled: false,
             github_apps: Vec::new(),
             github: apps::GithubBases::github(),
             webhooks: None,
