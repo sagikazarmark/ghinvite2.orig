@@ -11,7 +11,9 @@ invitation link authority, the `InvitationLink` Restate object
 module over Restate ingress. It maps the authority's documented terminal
 statuses to a typed `AuthorityError`: 400 to `Invalid`, 404 to `Missing`, 409 to
 `Conflict`, and every other failure to `Unknown`, which leaves the command's
-outcome unknown. It never reads SQL eligibility.
+outcome unknown. It never reads SQL eligibility. (Since 2026-11-24 the admin
+commands a revoked link refuses also map 410 to `Revoked`; see the amendment
+below.)
 
 ## Decision
 
@@ -118,3 +120,35 @@ replay precedes that fresh check, preserving a recorded decision or refusal.
 This coarse retained-state check does not replace the web's per-target checks.
 Repository availability remains a delivery prerequisite rather than a reason to
 prevent a historical personal owner from deciding a request or stopping a link.
+
+## Amendment (2026-11-24): a revoked link has its own status
+
+Rotating the secret of a revoked link, say from a stale Console tab, used to
+answer 409. The web reads every 409 as an operation identity bound to different
+input, so the Console showed the generic operation-conflict page. A bare 409
+cannot tell the two apart. Until f9d5b7c the fake answered 400 there, which
+hid the bug from the web tests.
+
+A command the link refuses because it is revoked now answers 410
+(`ghinvite_core::invitation_link::LINK_REVOKED_STATUS`). No other link answer
+uses 410, and Restate ingress passes the terminal error's code through
+unchanged. `RotationRefusal::status` holds the rule, and the object and the fake
+both call it. Two handlers answer 410: `rotate_secret` and a fresh
+`prepare_access_removal`. Both still check the operation's retained receipt
+first. An exact retry of a rotation or preview that completed before revocation
+replays its original answer, and a changed retry still conflicts (409). The
+refusal retains nothing and binds no identity.
+
+The web reads 410 as `AuthorityError::Revoked` only for those two commands.
+Everywhere else, including every requester view, 410 is still an unknown
+outcome, so a requester never learns that a link is revoked. When the Console
+gets `Revoked` from a rotation, it releases the attempt continuation and returns
+to the link details with "This invitation link is revoked, so its URL was not
+rotated. Nothing was changed." The revoke page already ignores a failed access
+preview.
+
+Pause, resume and revoke still report a revoked link as a typed business refusal
+in a 200 body (`LifecycleRefusal::Revoked`, `RevokeRefusal::Revoked`), and
+metadata updates apply to revoked links. One 409 that does not mean an identity
+conflict is left as it is: revocation at the revision limit. The authority
+cannot reach that limit in practice.

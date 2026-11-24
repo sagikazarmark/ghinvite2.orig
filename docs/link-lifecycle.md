@@ -14,6 +14,17 @@ and leaves an abuse hold in place; revoke aborts those held deliveries. A
 successful resume clears pause without changing immutable guardrails or uses.
 Revocation is terminal. Its default cascade still aborts an active abuse hold.
 
+A revoked link refuses fresh admin commands in one of two ways. Pause, resume
+and revoke return a typed `Revoked` refusal in a 200 body and retain it under
+the operation. Secret rotation and the access-removal preview answer 410
+(`LINK_REVOKED_STATUS`) and retain nothing. 409 always means an operation
+identity bound to different input, so the Console never confuses the two. A
+rotation from a stale tab returns to link details with "This invitation link is
+revoked, so its URL was not rotated. Nothing was changed." Each of these
+commands checks the operation's receipt before the revoked link. An exact retry
+of an operation completed before revocation replays its original result.
+Metadata updates still apply to a revoked link.
+
 ## Automatic pause
 
 Admission retains timestamps from the last rolling hour. Only an accepted new

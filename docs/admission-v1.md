@@ -52,7 +52,10 @@ completes before admission acknowledgement. Requests never call back synchronous
 to the link.
 
 HTTP 400 means invalid input, 404 missing/inaccessible authority, and 409 input
-conflict. HTTP 200 carries a retained business receipt. Unknown availability is
+conflict. HTTP 410 means an admin command refused because the link is revoked:
+a fresh secret rotation or access-removal preview. Nothing changed and no
+identity is bound. An exact replay of an operation retained before revocation
+still returns its receipt. HTTP 200 carries a retained business receipt. Unknown availability is
 503 without a business rejection. Transport uncertainty requires the same ID and
 input. An empty SQL view never overturns an acknowledged command.
 
