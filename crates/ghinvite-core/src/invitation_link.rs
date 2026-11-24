@@ -13,6 +13,13 @@ pub struct AccountAdmin {
     pub user_id: u64,
 }
 
+impl AccountAdmin {
+    /// The authority's admin check: a real user acting for this real account.
+    pub fn acts_for(&self, account_id: u64) -> bool {
+        self.account_id == account_id && account_id != 0 && self.user_id != 0
+    }
+}
+
 /// Default GitHub invitation lifetime: seven days.
 pub const fn default_invitation_lifetime_seconds() -> u32 {
     604800
@@ -371,6 +378,40 @@ impl LinkSnapshot {
             Some(m) => m.internal_note.as_deref(),
             None => self.creation.internal_note.as_deref(),
         }
+    }
+    /// Replace the mutable metadata. Saving the current details again changes
+    /// nothing; answers whether the link changed.
+    pub fn update_metadata(&mut self, metadata: LinkMetadata) -> bool {
+        if self.description() == metadata.description
+            && self.internal_note() == metadata.internal_note.as_deref()
+        {
+            return false;
+        }
+        self.metadata = Some(metadata);
+        self.revision += 1;
+        true
+    }
+    /// Move to the next secret generation, which the link knows only by hash.
+    pub fn rotate_secret(
+        &mut self,
+        new_sha256: SecretHash,
+    ) -> Result<SecretRotated, RotationRefusal> {
+        if self.revoked_at.is_some() {
+            return Err(RotationRefusal::Revoked);
+        }
+        let generation = self.secret.secret_generation.checked_add(1);
+        let revision = self.revision.checked_add(1);
+        let (Some(generation), Some(revision)) = (generation, revision) else {
+            return Err(RotationRefusal::Exhausted);
+        };
+        self.secret = LinkSecretState {
+            secret_generation: generation,
+            sha256: new_sha256,
+        };
+        self.revision = revision;
+        Ok(SecretRotated {
+            secret_generation: generation,
+        })
     }
     pub fn inactive(&self, now: DateTime<Utc>) -> Option<Inactive> {
         Inactive::check(
@@ -1080,4 +1121,12 @@ pub struct RotateSecret {
 #[serde(deny_unknown_fields)]
 pub struct SecretRotated {
     pub secret_generation: u32,
+}
+/// Why the authority refuses to rotate a link's secret.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum RotationRefusal {
+    #[error("link revoked")]
+    Revoked,
+    #[error("secret generation or link revision exhausted")]
+    Exhausted,
 }

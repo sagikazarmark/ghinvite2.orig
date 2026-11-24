@@ -16,6 +16,11 @@
 //! and hides the decline reason, and a page with nothing to show is missing.
 //! It records every call so tests can assert what reached the authority.
 //!
+//! The pure rules (admission, decisions, expiry, the revocation cascade,
+//! requester views, link metadata and secret rotation) are `ghinvite-core`'s,
+//! the same ones the real objects call; only dispatch, replay and bookkeeping
+//! are restated here.
+//!
 //! Tests script the failures web recovery depends on: a failure answered
 //! before the command applied ([`FakeLinkAuthority::fail`],
 //! [`FakeLinkAuthority::fail_once`]), and a command that applied but whose
@@ -40,13 +45,10 @@ use ghinvite_core::admission::{
 use ghinvite_core::delivery::{DispatchStage, RepositoryProgress};
 use ghinvite_core::invitation_link::{
     AccountAdmin, CreateLink, CreateLinkError, CreateLinkOutcome, GuardrailField, LinkCreated,
-    LinkMetadata, LinkSnapshot, RotateSecret, SecretRotated,
+    LinkMetadata, LinkSnapshot, RotateSecret, RotationRefusal, SecretRotated,
 };
 use ghinvite_core::request_lifecycle::RequestSnapshot;
-use ghinvite_core::request_lifecycle::{
-    DecideRequest, DecisionAction, DecisionOutcome, DecisionReceipt, RequestStatus,
-    TerminalDecision,
-};
+use ghinvite_core::request_lifecycle::{DecideRequest, DecisionReceipt, RequestStatus};
 use ghinvite_core::{InvitationLink, InvitationLinkId, RequestId, RequestState};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -80,9 +82,6 @@ pub fn accepted_repository_snapshot(
     });
     snapshot
 }
-
-/// How long an admitted request awaits review, as the real object sets it.
-const PENDING_LIFETIME: Duration = Duration::days(7);
 
 /// How a scripted method fails.
 #[derive(Clone, Copy)]
@@ -218,7 +217,7 @@ impl FakeLinkAuthority {
             request.link_id.expect("linked fixture").to_string(),
             request.requester_id,
         );
-        if blocks(&request) {
+        if Rejection::open_request(request.state).is_some() {
             inner.blockers.insert(blocker, request.request_id);
         } else if inner.blockers.get(&blocker) == Some(&request.request_id) {
             inner.blockers.remove(&blocker);
@@ -468,11 +467,6 @@ fn decision_key(command: &DecideRequest) -> (String, String) {
     )
 }
 
-/// The admin acts for the link's account, as the real `validate_admin` checks.
-fn admits(admin: &AccountAdmin, link: &LinkSnapshot) -> bool {
-    admin.account_id == link.creation.account_id && admin.account_id != 0 && admin.user_id != 0
-}
-
 async fn handle(
     State(inner): State<Arc<Mutex<Inner>>>,
     Path((service, key, method)): Path<(String, String, String)>,
@@ -567,13 +561,13 @@ fn answer(inner: &mut Inner, service: &str, key: String, method: &str, body: Val
         else {
             return status(404);
         };
-        evaluate(inner, &mut request, None, Utc::now());
-        return json(&ghinvite_core::request_lifecycle::RequesterView {
-            request: requester_view(request),
-            targets: link.creation.targets,
-            repositories: inner.progress.get(&key).cloned().unwrap_or_default(),
-            organization: inner.org_progress.get(&key).cloned(),
-        });
+        evaluate(inner, &mut request, Utc::now());
+        return json(&ghinvite_core::request_lifecycle::RequesterView::new(
+            request,
+            link.creation.targets,
+            inner.progress.get(&key).cloned().unwrap_or_default(),
+            inner.org_progress.get(&key).cloned(),
+        ));
     }
     let request_method = matches!(
         method,
@@ -607,10 +601,7 @@ fn answer(inner: &mut Inner, service: &str, key: String, method: &str, body: Val
                 return status(400);
             };
             inner.created.push(command.clone());
-            if command.admin.account_id != command.account_id
-                || command.account_id == 0
-                || command.admin.user_id == 0
-            {
+            if !command.admin.acts_for(command.account_id) {
                 return status(404);
             }
             let Ok(command) = command.canonical_input() else {
@@ -643,9 +634,8 @@ fn answer(inner: &mut Inner, service: &str, key: String, method: &str, body: Val
                     .insert(key, (command, outcome.clone()));
                 return json(&outcome);
             }
-            let creation = match normalize_creation(command) {
-                Ok(creation) => creation,
-                Err(code) => return status(code),
+            let Ok(creation) = command.normalized() else {
+                return status(400);
             };
             let now = Utc::now();
             if creation.expires_at.is_some_and(|expiry| expiry <= now) {
@@ -691,7 +681,7 @@ fn answer(inner: &mut Inner, service: &str, key: String, method: &str, body: Val
             let Some(link) = inner.links.get(&key) else {
                 return status(404);
             };
-            if !admits(&command.admin, link) {
+            if !command.admin.acts_for(link.creation.account_id) {
                 return status(404);
             }
             json(link)
@@ -704,7 +694,7 @@ fn answer(inner: &mut Inner, service: &str, key: String, method: &str, body: Val
             let Some(link) = inner.links.get(&key) else {
                 return status(404);
             };
-            if !admits(&command.admin, link) {
+            if !command.admin.acts_for(link.creation.account_id) {
                 return status(404);
             }
             let receipt_key = (key.clone(), String::from(command.operation_id.clone()));
@@ -741,22 +731,9 @@ fn answer(inner: &mut Inner, service: &str, key: String, method: &str, body: Val
                         .filter(|r| r.link_id == Some(command.link_id))
                     {
                         addressed_requests += 1;
-                        if request.state == RequestState::Pending && !transition(request, None, now)
-                        {
-                            request.state = RequestState::Cancelled;
-                            request.revision += 1;
-                            request.decision = Some(TerminalDecision {
-                                decision_id: format!("request.cancelled/{}", request.request_id),
-                                decided_by: None,
-                                effective_at: now,
-                                evaluated_at: now,
-                                decline_reason: None,
-                                requester_message: None,
-                                cancellation_reason: Some(
-                                    ghinvite_core::RequestCancellationReason::LinkRevoked,
-                                ),
-                            });
-                        }
+                        request
+                            .cancel_for_revoked_link(now)
+                            .expect("fixture revision in range");
                     }
                 }
                 inner.applied.push(method.into());
@@ -781,7 +758,7 @@ fn answer(inner: &mut Inner, service: &str, key: String, method: &str, body: Val
             let Some(link) = inner.links.get(&key) else {
                 return status(404);
             };
-            if !admits(&command.admin, link) {
+            if !command.admin.acts_for(link.creation.account_id) {
                 return status(404);
             }
             let accepted = inner.revoke_results.values().find_map(|(c, r)| {
@@ -810,7 +787,9 @@ fn answer(inner: &mut Inner, service: &str, key: String, method: &str, body: Val
             let Some(link) = inner.links.get(&key) else {
                 return status(404);
             };
-            if command.link_id.to_string() != key || !admits(&command.admin, link) {
+            if command.link_id.to_string() != key
+                || !command.admin.acts_for(link.creation.account_id)
+            {
                 return status(404);
             }
             let action = if method == "pause" {
@@ -852,7 +831,7 @@ fn answer(inner: &mut Inner, service: &str, key: String, method: &str, body: Val
             let Some(link) = inner.links.get_mut(&key) else {
                 return status(404);
             };
-            if !admits(&command.admin, link) {
+            if !command.admin.acts_for(link.creation.account_id) {
                 return status(404);
             }
             let operation = (key.clone(), String::from(command.operation_id.clone()));
@@ -863,20 +842,10 @@ fn answer(inner: &mut Inner, service: &str, key: String, method: &str, body: Val
                     status(409)
                 };
             }
-            if link.revoked_at.is_some() || link.secret.sha256.constant_time_eq(&command.new_sha256)
-            {
-                return status(400);
-            }
-            let Some(generation) = link.secret.secret_generation.checked_add(1) else {
-                return status(400);
-            };
-            link.secret = ghinvite_core::LinkSecretState {
-                secret_generation: generation,
-                sha256: command.new_sha256,
-            };
-            link.revision += 1;
-            let receipt = SecretRotated {
-                secret_generation: generation,
+            let receipt = match link.rotate_secret(command.new_sha256) {
+                Ok(receipt) => receipt,
+                Err(RotationRefusal::Revoked) => return status(409),
+                Err(RotationRefusal::Exhausted) => return status(400),
             };
             inner
                 .rotations
@@ -891,7 +860,7 @@ fn answer(inner: &mut Inner, service: &str, key: String, method: &str, body: Val
             let Some(link) = inner.links.get_mut(&key) else {
                 return status(404);
             };
-            if !admits(&command.admin, link) {
+            if !command.admin.acts_for(link.creation.account_id) {
                 return status(404);
             }
             let Ok(metadata) =
@@ -899,13 +868,7 @@ fn answer(inner: &mut Inner, service: &str, key: String, method: &str, body: Val
             else {
                 return status(400);
             };
-            // Saving the current details again changes nothing.
-            let changed = link.description() != metadata.description
-                || link.internal_note() != metadata.internal_note.as_deref();
-            if changed {
-                link.metadata = Some(metadata);
-                link.revision += 1;
-            }
+            let changed = link.update_metadata(metadata);
             let link = link.clone();
             if changed {
                 inner.applied.push(method.into());
@@ -920,25 +883,11 @@ fn answer(inner: &mut Inner, service: &str, key: String, method: &str, body: Val
             let Some(link) = inner.links.get(&key) else {
                 return status(404);
             };
-            if !admits(&command.admin, link) {
+            if !command.admin.acts_for(link.creation.account_id) {
                 return status(404);
             }
-            if let DecisionAction::Decline {
-                reason,
-                requester_message,
-            } = &mut command.action
-            {
-                *requester_message = ghinvite_core::request_lifecycle::normalize_requester_message(
-                    requester_message.take(),
-                )
-                .unwrap();
-                *reason = reason
-                    .take()
-                    .map(|s| s.trim().to_owned())
-                    .filter(|s| !s.is_empty());
-                if reason.as_ref().is_some_and(|s| s.len() > 16_384) {
-                    return status(400);
-                }
+            if command.action.normalize().is_err() {
+                return status(400);
             }
             let retained = inner.decisions.get(&decision_key(&command));
             if method == "decision_status" {
@@ -962,12 +911,12 @@ fn answer(inner: &mut Inner, service: &str, key: String, method: &str, body: Val
             if request.link_id != Some(link_id) {
                 return status(404);
             }
-            let was_pending = request.state == RequestState::Pending;
-            evaluate(inner, &mut request, Some(&command), Utc::now());
-            let receipt = DecisionReceipt {
-                outcome: outcome(was_pending, &command.action, &request),
-                request,
-            };
+            let revision = request.revision;
+            let outcome = request.decide(command.admin.user_id, &command.action, Utc::now());
+            if request.revision != revision {
+                keep(inner, &request);
+            }
+            let receipt = DecisionReceipt { outcome, request };
             inner
                 .decisions
                 .insert(decision_key(&command), (command, receipt.clone()));
@@ -1078,38 +1027,21 @@ fn answer(inner: &mut Inner, service: &str, key: String, method: &str, body: Val
             } else {
                 None
             };
-            // The real `decide_admission`: an overdue blocker expires first.
+            // An overdue blocker expires first, as the request owner's
+            // eligibility verdict expires it.
             let expired = blocking
                 .as_mut()
-                .and_then(|request| transition(request, None, now).then(|| request.clone()));
-            let evidence_rejected = command.scope_evidence.iter().any(|e| {
-                e.observed_at <= now
-                    && now - e.observed_at <= Duration::minutes(5)
-                    && (!e.available || !e.unavailable_target_ids.is_empty())
-            });
-            let domain_rejected = if link.creation.email_domains.is_empty() {
-                None
-            } else {
-                match command
-                    .domain_evidence
-                    .as_ref()
-                    .map(|e| e.check(&link.creation.email_domains, link.link_id, now))
-                {
-                    Some(Ok(())) => None,
-                    None => Some(Rejection::DomainEvidenceMissing),
-                    Some(Err(ghinvite_core::email_domain::DomainEvidenceError::Stale)) => {
-                        Some(Rejection::DomainEvidenceStale)
-                    }
-                    Some(Err(ghinvite_core::email_domain::DomainEvidenceError::Mismatch)) => {
-                        Some(Rejection::DomainMismatch {
-                            required: link.creation.email_domains.clone(),
-                        })
-                    }
-                }
-            };
-            let reason = local_rejection(&link, blocking.as_ref(), now)
-                .or(domain_rejected)
-                .or(evidence_rejected.then_some(Rejection::ScopeUnavailable))
+                .and_then(|request| request.expire_due(now).then(|| request.clone()));
+            let reason = link
+                .inactive(now)
+                .map(Rejection::from)
+                .or_else(|| blocking.and_then(|r| Rejection::open_request(r.state)))
+                .or_else(|| command.domain_refusal(&link.creation.email_domains, now))
+                .or_else(|| {
+                    command
+                        .scope_unavailable(&link.creation.targets, now)
+                        .then_some(Rejection::ScopeUnavailable)
+                })
                 .or(match &availability {
                     Some(Availability::Unavailable(reason)) => Some(reason.clone()),
                     _ => None,
@@ -1119,7 +1051,10 @@ fn answer(inner: &mut Inner, service: &str, key: String, method: &str, body: Val
             } else if matches!(availability, Some(Availability::Unknown)) {
                 (None, None)
             } else {
-                let request = accept(&mut link, &command, now);
+                let approval_required = link.creation.approval_required;
+                let request = command
+                    .accept(&mut link, RequestId::new(), approval_required, now)
+                    .expect("fixture use count in range");
                 let result = AdmissionResult::Accepted {
                     request_id: request.request_id,
                     state: request.state,
@@ -1127,7 +1062,7 @@ fn answer(inner: &mut Inner, service: &str, key: String, method: &str, body: Val
                 };
                 (Some(result), Some(request))
             };
-            // Apply the after-images, as `apply_admission` does.
+            // Apply the after-images.
             if request.is_none() && expired.is_some() {
                 link.revision += 1;
             }
@@ -1178,28 +1113,17 @@ fn answer(inner: &mut Inner, service: &str, key: String, method: &str, body: Val
             let Some(link) = inner.links.get(&key) else {
                 return status(404);
             };
-            let now = Utc::now();
             if query.link_id != link.link_id
                 || !link
                     .secret
                     .matches(&query.secret_sha256, query.secret_generation)
-                || link.revoked_at.is_some()
-                || link.creation.expires_at.is_some_and(|t| t <= now)
-                || link
-                    .creation
-                    .max_uses
-                    .is_some_and(|n| link.uses >= u64::from(n))
             {
                 return status(404);
             }
-            json(&ghinvite_core::admission::LinkOffer {
-                link_id: link.link_id,
-                account_id: link.creation.account_id,
-                targets: link.creation.targets.clone(),
-                approval_required: link.creation.approval_required,
-                email_domains: link.creation.email_domains.clone(),
-                paused: link.pause.is_some(),
-            })
+            match ghinvite_core::admission::LinkOffer::current(link, Utc::now()) {
+                Some(offer) => json(&offer),
+                None => status(404),
+            }
         }
         "requester_page" => {
             let Ok(query) = serde_json::from_value::<AttemptQuery>(body) else {
@@ -1269,7 +1193,7 @@ fn answer(inner: &mut Inner, service: &str, key: String, method: &str, body: Val
                 if current.requester_id != query.requester_id {
                     return status(404);
                 }
-                evaluate(inner, &mut current, None, now);
+                evaluate(inner, &mut current, now);
                 request = Some(current);
             }
             // An old receipt can name a terminal request while a newer
@@ -1280,12 +1204,13 @@ fn answer(inner: &mut Inner, service: &str, key: String, method: &str, body: Val
                 let Some(mut current) = inner.requests.get(&id.to_string()).cloned() else {
                     return status(404);
                 };
-                evaluate(inner, &mut current, None, now);
+                evaluate(inner, &mut current, now);
                 Some(current)
             } else {
                 None
             };
-            let can_start_fresh = local_rejection(&link, blocker.as_ref(), now).is_none();
+            let can_start_fresh = link.inactive(now).is_none()
+                && blocker.is_none_or(|r| Rejection::open_request(r.state).is_none());
             let paused = link.inactive(now) == Some(ghinvite_core::Inactive::Paused);
             if !can_start_fresh && !paused && attempt.is_none() && request.is_none() {
                 return status(404);
@@ -1300,7 +1225,7 @@ fn answer(inner: &mut Inner, service: &str, key: String, method: &str, body: Val
                 approval_required: link.creation.approval_required,
                 can_start_fresh,
                 attempt,
-                request: request.map(requester_view),
+                request: request.map(RequestSnapshot::requester_view),
             })
         }
         "organization_delivery_progress" => {
@@ -1355,29 +1280,9 @@ fn answer(inner: &mut Inner, service: &str, key: String, method: &str, body: Val
     }
 }
 
-/// The real `normalize_creation`: the input the creation identity binds.
-fn normalize_creation(command: CreateLink) -> Result<CreateLink, u16> {
-    if command.admin.account_id != command.account_id
-        || command.account_id == 0
-        || command.admin.user_id == 0
-    {
-        return Err(404);
-    }
-    command.normalized().map_err(|_| 400)
-}
-
-/// The real `InvitationLink::transition`: evaluate a stored request at `now`
-/// and keep the result. A request that leaves pending other than by approval
-/// no longer blocks its requester.
-fn evaluate(
-    inner: &mut Inner,
-    request: &mut RequestSnapshot,
-    command: Option<&DecideRequest>,
-    now: DateTime<Utc>,
-) {
-    if !transition(request, command, now) {
-        return;
-    }
+/// Keep a request the shared rules changed. A request that leaves pending
+/// other than by approval no longer blocks its requester.
+fn keep(inner: &mut Inner, request: &RequestSnapshot) {
     inner
         .requests
         .insert(request.request_id.to_string(), request.clone());
@@ -1392,156 +1297,10 @@ fn evaluate(
     }
 }
 
-/// The real `transition_request`: a pending request past its deadline
-/// expires, otherwise an admin decision applies. A request that already left
-/// pending, or a read without a decision, is unchanged. Answers whether the
-/// request changed.
-fn transition(
-    request: &mut RequestSnapshot,
-    command: Option<&DecideRequest>,
-    now: DateTime<Utc>,
-) -> bool {
-    if request.state != RequestState::Pending {
-        return false;
+/// Evaluate a stored request at `now`, as every real read does, and keep the
+/// result.
+fn evaluate(inner: &mut Inner, request: &mut RequestSnapshot, now: DateTime<Utc>) {
+    if request.expire_due(now) {
+        keep(inner, request);
     }
-    let deadline = request.decision_deadline.expect("pending deadline");
-    let (state, decided_by, effective_at, decline_reason) = if now >= deadline {
-        (RequestState::Expired, None, deadline, None)
-    } else if let Some(command) = command {
-        match &command.action {
-            DecisionAction::Approve => (
-                RequestState::Approved,
-                Some(command.admin.user_id),
-                now,
-                None,
-            ),
-            DecisionAction::Decline { reason, .. } => (
-                RequestState::Declined,
-                Some(command.admin.user_id),
-                now,
-                reason.clone(),
-            ),
-        }
-    } else {
-        return false;
-    };
-    request.state = state;
-    request.revision += 1;
-    request.decision = Some(TerminalDecision {
-        decision_id: format!("request.{state}/{}", request.request_id),
-        decided_by,
-        effective_at,
-        evaluated_at: now,
-        cancellation_reason: None,
-        decline_reason,
-        requester_message: command.and_then(|c| match &c.action {
-            DecisionAction::Decline {
-                requester_message, ..
-            } if state == RequestState::Declined => requester_message.clone(),
-            _ => None,
-        }),
-    });
-    true
-}
-
-/// The real `local_rejection`: an inactive link, then one pending or
-/// approved request per requester.
-fn local_rejection(
-    link: &LinkSnapshot,
-    request: Option<&RequestSnapshot>,
-    now: DateTime<Utc>,
-) -> Option<Rejection> {
-    if let Some(inactive) = link.inactive(now) {
-        Some(inactive.into())
-    } else if request.is_some_and(|r| r.state == RequestState::Pending) {
-        Some(Rejection::AlreadyPending)
-    } else if request.is_some_and(|r| r.state == RequestState::Approved) {
-        Some(Rejection::AlreadyApproved)
-    } else {
-        None
-    }
-}
-
-/// Script an accepted response: consume one use of `link` and create the admitted
-/// request, pending until its deadline or approved at once when the link
-/// needs no approval.
-fn accept(link: &mut LinkSnapshot, command: &Admit, now: DateTime<Utc>) -> RequestSnapshot {
-    let request_id = RequestId::new();
-    let approval_required = link.creation.approval_required;
-    let state = if approval_required {
-        RequestState::Pending
-    } else {
-        RequestState::Approved
-    };
-    link.uses += 1;
-    link.revision += 1;
-    RequestSnapshot {
-        batch: None,
-        domain_evidence: (!link.creation.email_domains.is_empty())
-            .then(|| command.domain_evidence.clone())
-            .flatten(),
-        request_id,
-        link_id: Some(link.link_id),
-        account_id: link.creation.account_id,
-        requester_id: command.requester_id,
-        justification: command.justification.clone(),
-        state,
-        admitted_at: now,
-        decision_deadline: approval_required.then_some(now + PENDING_LIFETIME),
-        revision: 1,
-        decision: (!approval_required).then(|| TerminalDecision {
-            decision_id: format!("request.approved/{request_id}"),
-            decided_by: None,
-            effective_at: now,
-            evaluated_at: now,
-            cancellation_reason: None,
-            decline_reason: None,
-            requester_message: None,
-        }),
-    }
-}
-
-/// The real `requester_view`: the requester never sees the decline reason.
-fn requester_view(mut request: RequestSnapshot) -> RequestSnapshot {
-    if let Some(decision) = &mut request.decision {
-        decision.decline_reason = None;
-    }
-    request
-}
-
-/// The real `decision_outcome`.
-fn outcome(
-    was_pending: bool,
-    action: &DecisionAction,
-    request: &RequestSnapshot,
-) -> DecisionOutcome {
-    let matching = match action {
-        DecisionAction::Approve => request.state == RequestState::Approved,
-        DecisionAction::Decline {
-            reason,
-            requester_message,
-        } => {
-            request.state == RequestState::Declined
-                && request.decision.as_ref().is_some_and(|d| {
-                    &d.decline_reason == reason && &d.requester_message == requester_message
-                })
-        }
-    };
-    if request.state == RequestState::Cancelled {
-        DecisionOutcome::NotPending
-    } else if !matching {
-        DecisionOutcome::Incompatible
-    } else if was_pending {
-        DecisionOutcome::Applied
-    } else {
-        DecisionOutcome::AlreadyCompleted
-    }
-}
-
-/// A pending or approved request blocks its requester's admission.
-fn blocks(request: &RequestSnapshot) -> bool {
-    matches!(
-        request.state,
-        RequestState::Pending | RequestState::Approved
-    )
 }

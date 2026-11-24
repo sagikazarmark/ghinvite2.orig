@@ -19,12 +19,12 @@ use serde::{Deserialize, Serialize};
 pub use ghinvite_core::admission::*;
 pub use ghinvite_core::invitation_link::{
     AccountAdmin, CreateLink, CreateLinkError, CreateLinkOutcome, GuardrailField, LinkCreated,
-    LinkSecretState, LinkSnapshot, RotateSecret, SecretRotated,
+    LinkSecretState, LinkSnapshot, RotateSecret, RotationRefusal, SecretRotated,
 };
 use ghinvite_core::link_lifecycle::{LifecycleAction, LifecycleCommand, LifecycleOutcome};
 pub use ghinvite_core::request_lifecycle::{
     DecideRequest, DecisionAction, DecisionOutcome, DecisionReceipt, InitializeRequest,
-    RequestSnapshot, RequestStatus, TerminalDecision,
+    PENDING_LIFETIME, RequestSnapshot, RequestStatus, TerminalDecision,
 };
 pub use ghinvite_core::storage::projection::{AuditIntent, ProjectionEnvelope};
 
@@ -34,8 +34,6 @@ struct LifecycleRecord {
     action: LifecycleAction,
     outcome: LifecycleOutcome,
 }
-
-pub const PENDING_LIFETIME: chrono::Duration = chrono::Duration::days(7);
 
 #[derive(Clone, Serialize, Deserialize)]
 struct CreationReceipt {
@@ -234,7 +232,7 @@ fn validate_key(ctx: &ObjectContext<'_>, id: InvitationLinkId) -> Result<(), Ter
     Ok(())
 }
 fn validate_admin(admin: &AccountAdmin, account: u64) -> Result<(), TerminalError> {
-    if admin.account_id != account || account == 0 || admin.user_id == 0 {
+    if !admin.acts_for(account) {
         return Err(missing());
     }
     Ok(())
@@ -626,23 +624,14 @@ impl InvitationLink {
                 Err(conflict())
             };
         }
-        if link.revoked_at.is_some() {
-            return Err(TerminalError::new_with_code(409, "link revoked"));
-        }
-        let generation = link
-            .secret
-            .secret_generation
-            .checked_add(1)
-            .ok_or_else(invalid)?;
+        let receipt = link
+            .rotate_secret(input.new_sha256)
+            .map_err(|refusal| match refusal {
+                RotationRefusal::Revoked => TerminalError::new_with_code(409, "link revoked"),
+                RotationRefusal::Exhausted => invalid(),
+            })?;
+        let generation = receipt.secret_generation;
         let now = self.time(&ctx, "rotation_time").await?;
-        link.secret = LinkSecretState {
-            secret_generation: generation,
-            sha256: input.new_sha256,
-        };
-        link.revision = link.revision.checked_add(1).ok_or_else(invalid)?;
-        let receipt = SecretRotated {
-            secret_generation: generation,
-        };
         ctx.set("link", Json(link.clone()));
         ctx.set(&key, Json((input.clone(), receipt.clone())));
         let mut audit = event(
@@ -668,13 +657,9 @@ impl InvitationLink {
             input.internal_note.as_deref(),
         )
         .map_err(|_| invalid())?;
-        if link.description() == metadata.description
-            && link.internal_note() == metadata.internal_note.as_deref()
-        {
+        if !link.update_metadata(metadata) {
             return Ok(Json(link));
         }
-        link.metadata = Some(metadata);
-        link.revision += 1;
         let now = self.time(&ctx, "metadata_time").await?;
         let Json(mut event) = ctx
             .run(|| async {
@@ -843,16 +828,12 @@ impl InvitationLink {
                 .map_err(|_| uncertain())?
                 .0;
             self.checkpoint(&ctx, "after-verdict").await?;
-            if verdict.blocking {
+            if let Some(reason) =
+                Rejection::open_request(verdict.state).filter(|_| verdict.blocking)
+            {
                 let receipt = AdmissionReceipt {
                     decided_at: verdict.evaluated_at,
-                    result: AdmissionResult::Rejected {
-                        reason: if verdict.state == RequestState::Pending {
-                            Rejection::AlreadyPending
-                        } else {
-                            Rejection::AlreadyApproved
-                        },
-                    },
+                    result: AdmissionResult::Rejected { reason },
                 };
                 ctx.set(
                     &key,
@@ -914,9 +895,10 @@ impl InvitationLink {
                 let reason = link
                     .inactive(now)
                     .map(Rejection::from)
-                    .or_else(|| domain_refusal(&input, &link.creation.email_domains, now))
+                    .or_else(|| input.domain_refusal(&link.creation.email_domains, now))
                     .or_else(|| {
-                        scope_unavailable(&input, &link.creation.targets, now)
+                        input
+                            .scope_unavailable(&link.creation.targets, now)
                             .then_some(Rejection::ScopeUnavailable)
                     });
                 let (result, changed, initialization) = if let Some(reason) = reason {
@@ -945,39 +927,11 @@ impl InvitationLink {
                     )
                 } else {
                     let mut link = link.clone();
-                    link.uses = link.uses.checked_add(1).ok_or_else(invalid)?;
-                    link.revision += 1;
-                    let request_id = RequestId::new();
-                    let state = if approval_required {
-                        RequestState::Pending
-                    } else {
-                        RequestState::Approved
-                    };
-                    let deadline = approval_required.then_some(now + PENDING_LIFETIME);
-                    let request = RequestSnapshot {
-                        domain_evidence: (!link.creation.email_domains.is_empty())
-                            .then(|| input.domain_evidence.clone())
-                            .flatten(),
-                        request_id,
-                        link_id: Some(link.link_id),
-                        batch: None,
-                        account_id: link.creation.account_id,
-                        requester_id: input.requester_id,
-                        justification: input.justification.clone(),
-                        state,
-                        admitted_at: now,
-                        decision_deadline: deadline,
-                        revision: 1,
-                        decision: (state == RequestState::Approved).then(|| TerminalDecision {
-                            decision_id: format!("request.approved/{request_id}"),
-                            decided_by: None,
-                            effective_at: now,
-                            evaluated_at: now,
-                            cancellation_reason: None,
-                            decline_reason: None,
-                            requester_message: None,
-                        }),
-                    };
+                    let request = input
+                        .accept(&mut link, RequestId::new(), approval_required, now)
+                        .ok_or_else(invalid)?;
+                    let (request_id, state, deadline) =
+                        (request.request_id, request.state, request.decision_deadline);
                     let initialization = InitializeRequest {
                         access_lifetime_seconds: link.creation.access_lifetime_seconds,
                         budget_share_pct: link.creation.budget_share_pct,
@@ -1102,19 +1056,9 @@ impl InvitationLink {
             return Err(missing());
         }
         let now = self.time(&ctx, "offer_time").await?;
-        let paused = match current.inactive(now) {
-            None => false,
-            Some(ghinvite_core::Inactive::Paused) => true,
-            Some(_) => return Err(missing()),
-        };
-        Ok(Json(LinkOffer {
-            link_id: current.link_id,
-            account_id: current.creation.account_id,
-            targets: current.creation.targets,
-            approval_required: current.creation.approval_required,
-            email_domains: current.creation.email_domains,
-            paused,
-        }))
+        LinkOffer::current(&current, now)
+            .map(Json)
+            .ok_or_else(missing)
     }
 
     #[handler]
@@ -1231,7 +1175,7 @@ impl InvitationLink {
             && link.inactive(now).is_none()
             && latest_request
                 .as_ref()
-                .is_none_or(|r| !matches!(r.state, RequestState::Pending | RequestState::Approved));
+                .is_none_or(|r| Rejection::open_request(r.state).is_none());
         let paused = link.inactive(now) == Some(ghinvite_core::Inactive::Paused);
         if !can_start_fresh && !paused && attempt.is_none() && request.is_none() {
             return Err(missing());
@@ -1251,97 +1195,9 @@ impl InvitationLink {
     }
 }
 
-/// Caller-supplied observations are advisory: only a recent negative for an
-/// application required by these targets can refuse admission. Missing, stale,
-/// and future-dated observations cannot establish current unavailability.
-fn scope_unavailable(
-    input: &Admit,
-    targets: &ghinvite_core::targets::Targets,
-    now: chrono::DateTime<Utc>,
-) -> bool {
-    input.scope_evidence.iter().any(|e| {
-        let required = match e.app {
-            ghinvite_core::account::App::Repo => !targets.repos.is_empty(),
-            ghinvite_core::account::App::Org => targets.organization.is_some(),
-        };
-        required
-            && !e.available
-            && e.observed_at <= now
-            && now - e.observed_at <= chrono::Duration::minutes(5)
-    })
-}
-
-fn domain_refusal(
-    input: &Admit,
-    rules: &[ghinvite_core::email_domain::DomainRule],
-    now: DateTime<Utc>,
-) -> Option<Rejection> {
-    use ghinvite_core::email_domain::DomainEvidenceError;
-    if rules.is_empty() {
-        return None;
-    }
-    let Some(evidence) = &input.domain_evidence else {
-        return Some(Rejection::DomainEvidenceMissing);
-    };
-    match evidence.check(rules, input.link_id, now) {
-        Ok(()) => None,
-        Err(DomainEvidenceError::Stale) => Some(Rejection::DomainEvidenceStale),
-        Err(DomainEvidenceError::Mismatch) => Some(Rejection::DomainMismatch {
-            required: rules.to_vec(),
-        }),
-    }
-}
-
 fn same_attempt(a: &Admit, b: &Admit) -> bool {
     let hashes_match = a.secret_sha256.constant_time_eq(&b.secret_sha256);
     let mut a = a.clone();
     a.secret_sha256 = b.secret_sha256;
     hashes_match & (a == *b)
-}
-
-#[cfg(test)]
-mod capability_policy_tests {
-    use super::*;
-    use ghinvite_core::targets::{RepoRole, RepoTarget, Targets};
-
-    #[test]
-    fn scope_refusal_requires_a_recent_negative_for_a_required_app() {
-        let now = chrono::DateTime::from_timestamp(1_800_000_000, 0).unwrap();
-        let targets = Targets {
-            organization: None,
-            teams: vec![],
-            repos: vec![RepoTarget {
-                repo_id: 10,
-                repo_full_name: "acme/api".into(),
-                grant: RepoRole::Read,
-            }],
-        };
-        let mut input = Admit {
-            domain_evidence: None,
-            link_id: InvitationLinkId::new(),
-            operation_id: AdmissionOperationId::try_from(RequestId::new().to_string()).unwrap(),
-            requester_id: 8,
-            justification: None,
-            secret_sha256: [42; 32].into(),
-            secret_generation: 1,
-            scope_evidence: vec![],
-        };
-        assert!(!scope_unavailable(&input, &targets, now));
-        for (age, available, app, refused) in [
-            (120, false, ghinvite_core::account::App::Repo, true),
-            (300, false, ghinvite_core::account::App::Repo, true),
-            (301, false, ghinvite_core::account::App::Repo, false),
-            (-1, false, ghinvite_core::account::App::Repo, false),
-            (120, true, ghinvite_core::account::App::Repo, false),
-            (120, false, ghinvite_core::account::App::Org, false),
-        ] {
-            input.scope_evidence = vec![ScopeEvidence {
-                app,
-                observed_at: now - chrono::Duration::seconds(age),
-                available,
-                unavailable_target_ids: vec![10],
-            }];
-            assert_eq!(scope_unavailable(&input, &targets, now), refused);
-        }
-    }
 }

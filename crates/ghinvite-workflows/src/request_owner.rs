@@ -2,8 +2,8 @@
 use chrono::{DateTime, Utc};
 use ghinvite_core::audit::EventType;
 use ghinvite_core::request_lifecycle::{
-    ApprovedDispatch, DecideRequest, DecisionAction, DecisionOutcome, DecisionReceipt,
-    DeliveryStatus, InitializeRequest, RequestSnapshot, RequestStatus, SubmittedCommand,
+    ApprovedDispatch, DecideRequest, DecisionOutcome, DecisionReceipt, DeliveryStatus,
+    InitializeRequest, RequestSnapshot, RequestStatus, SubmittedCommand,
     SubmittedOrganizationCommand,
 };
 use ghinvite_core::storage::projection::{AuditIntent, RequestProjectionEnvelope};
@@ -231,7 +231,9 @@ impl InvitationRequest {
             initial.state == RequestState::Pending
                 && initial.decision.is_none()
                 && initial.decision_deadline
-                    == Some(initial.admitted_at + crate::admission::PENDING_LIFETIME)
+                    == Some(
+                        initial.admitted_at + ghinvite_core::request_lifecycle::PENDING_LIFETIME,
+                    )
         } else {
             initial.state == RequestState::Approved
                 && initial.decision_deadline.is_none()
@@ -407,31 +409,10 @@ async fn expire(
     mut request: RequestSnapshot,
     now: DateTime<Utc>,
 ) -> RequestSnapshot {
-    if expire_due(&mut request, now) {
+    if request.expire_due(now) {
         ctx.set("request", Json(request.clone()));
     }
     request
-}
-
-/// One deadline transition, shared by inspection, timers and decision arbitration.
-fn expire_due(request: &mut RequestSnapshot, now: DateTime<Utc>) -> bool {
-    if request.state == RequestState::Pending && request.decision_deadline.is_some_and(|d| now >= d)
-    {
-        request.state = RequestState::Expired;
-        request.revision += 1;
-        request.decision = Some(ghinvite_core::request_lifecycle::TerminalDecision {
-            decision_id: format!("request.expired/{}", request.request_id),
-            decided_by: None,
-            effective_at: request.decision_deadline.unwrap(),
-            evaluated_at: now,
-            cancellation_reason: None,
-            decline_reason: None,
-            requester_message: None,
-        });
-        true
-    } else {
-        false
-    }
 }
 
 pub(crate) fn events(request: &RequestSnapshot) -> Vec<AuditIntent> {
@@ -512,22 +493,10 @@ struct DecisionRecord {
 }
 
 fn normalize(input: &mut DecideRequest) -> Result<String, TerminalError> {
-    if let DecisionAction::Decline {
-        reason,
-        requester_message,
-    } = &mut input.action
-    {
-        *requester_message =
-            ghinvite_core::request_lifecycle::normalize_requester_message(requester_message.take())
-                .map_err(|message| TerminalError::new_with_code(400, message))?;
-        *reason = reason
-            .take()
-            .map(|s| s.trim().to_owned())
-            .filter(|s| !s.is_empty());
-        if reason.as_ref().is_some_and(|s| s.len() > 16_384) {
-            return Err(TerminalError::new_with_code(400, "invalid reason"));
-        }
-    }
+    input
+        .action
+        .normalize()
+        .map_err(|message| TerminalError::new_with_code(400, message))?;
     Ok(format!(
         "decision/{}",
         String::from(input.operation_id.clone())
@@ -557,25 +526,9 @@ impl InvitationRequest {
         };
         if current.state == RequestState::Pending {
             let now = self.time(ctx, "cascade_evaluation_time").await?;
-            if !expire_due(&mut current, now) {
-                current.state = RequestState::Cancelled;
-                current.revision = current
-                    .revision
-                    .checked_add(1)
-                    .filter(|n| *n <= ghinvite_core::storage::integer::MAX_EXACT)
-                    .ok_or_else(conflict)?;
-                current.decision = Some(ghinvite_core::request_lifecycle::TerminalDecision {
-                    decision_id: format!("request.cancelled/{}", current.request_id),
-                    decided_by: None,
-                    effective_at: now,
-                    evaluated_at: now,
-                    decline_reason: None,
-                    requester_message: None,
-                    cancellation_reason: Some(
-                        ghinvite_core::RequestCancellationReason::LinkRevoked,
-                    ),
-                });
-            }
+            current
+                .cancel_for_revoked_link(now)
+                .map_err(|_| conflict())?;
             ctx.set("request", Json(current.clone()));
         }
         // Replays can repair a lost projection acknowledgement, while the
@@ -1085,10 +1038,7 @@ impl InvitationRequest {
         let verdict = EligibilityVerdict {
             evaluated_at,
             state: request.state,
-            blocking: matches!(
-                request.state,
-                RequestState::Pending | RequestState::Approved
-            ),
+            blocking: ghinvite_core::admission::Rejection::open_request(request.state).is_some(),
         };
         ctx.set(
             &key,
@@ -1161,12 +1111,9 @@ impl InvitationRequest {
         {
             return Err(missing());
         }
-        let mut request = expire(&ctx, request, self.evaluated_at(&ctx).await?).await;
+        let request = expire(&ctx, request, self.evaluated_at(&ctx).await?).await;
         project(&ctx, &request).await?;
-        if let Some(decision) = &mut request.decision {
-            decision.decline_reason = None;
-        }
-        Ok(Json(request))
+        Ok(Json(request.requester_view()))
     }
 
     /// Request-ID navigation does not grant a link capability or a new admission.
@@ -1187,7 +1134,7 @@ impl InvitationRequest {
         {
             return Err(missing());
         }
-        let mut request = expire(&ctx, request, self.evaluated_at(&ctx).await?).await;
+        let request = expire(&ctx, request, self.evaluated_at(&ctx).await?).await;
         project(&ctx, &request).await?;
         let initial = ctx
             .get::<Json<InitializeRequest>>("input")
@@ -1235,16 +1182,12 @@ impl InvitationRequest {
                 });
             }
         }
-        if let Some(decision) = &mut request.decision {
-            decision.decline_reason = None;
-        }
-        request.domain_evidence = None;
-        Ok(Json(RequesterView {
+        Ok(Json(RequesterView::new(
             request,
-            targets: initial.targets,
+            initial.targets,
             repositories,
             organization,
-        }))
+        )))
     }
 
     #[handler]
@@ -1323,65 +1266,10 @@ impl InvitationRequest {
         let Json(receipt) = ctx
             .run(|| async {
                 let mut request = request.clone();
-                let was_pending = request.state == RequestState::Pending;
-                if was_pending && !expire_due(&mut request, now) {
-                    request.decision_deadline.ok_or_else(conflict)?;
-                    let (state, kind, reason, requester_message, actor, effective_at) =
-                        match &input.action {
-                            DecisionAction::Approve => (
-                                RequestState::Approved,
-                                EventType::RequestApproved,
-                                None,
-                                None,
-                                Some(input.admin.user_id),
-                                now,
-                            ),
-                            DecisionAction::Decline {
-                                reason,
-                                requester_message,
-                            } => (
-                                RequestState::Declined,
-                                EventType::RequestDeclined,
-                                reason.clone(),
-                                requester_message.clone(),
-                                Some(input.admin.user_id),
-                                now,
-                            ),
-                        };
-                    request.state = state;
-                    request.revision += 1;
-                    request.decision = Some(ghinvite_core::request_lifecycle::TerminalDecision {
-                        decision_id: format!("{kind}/{}", request.request_id),
-                        decided_by: actor,
-                        effective_at,
-                        evaluated_at: now,
-                        cancellation_reason: None,
-                        decline_reason: reason,
-                        requester_message,
-                    });
+                if request.state == RequestState::Pending && request.decision_deadline.is_none() {
+                    return Err(conflict().into());
                 }
-                let matching = match &input.action {
-                    DecisionAction::Approve => request.state == RequestState::Approved,
-                    DecisionAction::Decline {
-                        reason,
-                        requester_message,
-                    } => {
-                        request.state == RequestState::Declined
-                            && request.decision.as_ref().is_some_and(|d| {
-                                &d.decline_reason == reason
-                                    && &d.requester_message == requester_message
-                            })
-                    }
-                };
-                let outcome = if request.state == RequestState::Cancelled {
-                    DecisionOutcome::NotPending
-                } else if !matching {
-                    DecisionOutcome::Incompatible
-                } else if was_pending {
-                    DecisionOutcome::Applied
-                } else {
-                    DecisionOutcome::AlreadyCompleted
-                };
+                let outcome = request.decide(input.admin.user_id, &input.action, now);
                 Ok::<_, HandlerError>(Json(DecisionReceipt { request, outcome }))
             })
             .name("record_decision")

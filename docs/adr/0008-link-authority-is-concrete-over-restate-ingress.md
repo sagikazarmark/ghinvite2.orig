@@ -18,9 +18,18 @@ outcome unknown. It never reads SQL eligibility.
 There is deliberately no `LinkAuthority` trait and no in-memory adapter. The
 seam stays at ingress HTTP. Tests run the real `LinkAuthority` and its real
 status mapping against `FakeLinkAuthority`
-(`crates/ghinvite-web/tests/common/link_authority.rs`), an in-process server
-that answers the same ingress paths with the same status codes as the Restate
-objects. That fake is the second adapter.
+(`crates/ghinvite-web/tests/common/authority_http_fixture.rs`), an in-process
+server that answers the same ingress paths with the same status codes as the
+Restate objects. That fake is the second adapter.
+
+The fake does not restate the authority's pure rules. Admission (acceptance,
+open-request, domain and scope refusals, the offer), decisions, expiry, the
+revocation cascade, requester views, metadata updates and secret rotation are
+`ghinvite-core` functions (`admission.rs`, `request_lifecycle.rs`,
+`invitation_link.rs`, `link_lifecycle.rs`) that the Restate objects and the
+fake both call, so they cannot drift apart. The fake keeps only ingress
+dispatch, replay and its own bookkeeping. Nothing yet runs the same ingress
+scenarios against both the fake and the real objects (#114).
 
 ## Rejected: a trait with an in-memory authority
 
