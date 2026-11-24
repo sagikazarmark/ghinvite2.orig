@@ -56,6 +56,9 @@ struct Scenario {
     roles: Vec<&'static str>,
     role_reads: usize,
     pending: Option<&'static str>,
+    // An invitation at this role appears after S1's listing: the PUT answers
+    // 201 with it, at its own role, as GitHub does for a pending invitation.
+    raced_invitation: Option<&'static str>,
     writes: VecDeque<WriteReply>,
     read_mints: usize,
     write_mints: usize,
@@ -80,6 +83,7 @@ impl Default for Scenario {
             roles: vec!["none"],
             role_reads: 0,
             pending: None,
+            raced_invitation: None,
             writes: VecDeque::from([WriteReply::Status(201)]),
             read_mints: 0,
             write_mints: 0,
@@ -200,13 +204,14 @@ async fn github(State(state): State<Arc<Github>>, request: axum::extract::Reques
                 assert_eq!(body, if method=="PUT" {json!({"permission":"push"})} else {json!({"permissions":"write"})});
                 let reply = state.writes.pop_front().expect("unexpected extra GitHub mutation");
                 let status = match reply { WriteReply::Status(status) | WriteReply::Policy(status, _) => status, WriteReply::Timeout => {delay=true;503}, WriteReply::RateLimited(_)=>429, WriteReply::Spammed=>422 };
-                if status==201 || status==200 { state.pending=Some("write"); if state.created_at.is_none() { state.created_at=Some(Utc::now()); } }
+                let permission = match method.as_str() { "PUT" => state.raced_invitation.unwrap_or("write"), _ => "write" };
+                if status==201 || status==200 { state.pending=Some(permission); if state.created_at.is_none() { state.created_at=Some(Utc::now()); } }
                 let status = axum::http::StatusCode::from_u16(status).unwrap();
                 if let WriteReply::RateLimited(seconds) = reply { (status, [("retry-after", seconds.to_string())], Json(json!({"message":"secondary rate limit"}))).into_response() }
                 else if matches!(reply, WriteReply::Spammed) { (status,Json(json!({"errors":[{"code":"spammed"}]}))).into_response() }
                 else if status==axum::http::StatusCode::NO_CONTENT { status.into_response() }
                 else if status.is_success() {
-                    let mut response = invitation("write");
+                    let mut response = invitation(permission);
                     if let Some(at) = state.created_at {
                         response["created_at"] = json!(at);
                     }
@@ -745,6 +750,50 @@ async fn roles_pending_and_race_never_lower_access_or_claim_unneeded_fences() {
             "confirmed replay performs no GitHub calls"
         );
     }
+    runtime.finish().await;
+}
+
+#[tokio::test]
+async fn invitation_raced_in_before_the_put_is_patched_to_the_grant() {
+    let runtime = Runtime::start().await;
+    let command = runtime
+        .command(
+            Scenario {
+                raced_invitation: Some("read"),
+                writes: VecDeque::from([WriteReply::Status(201), WriteReply::Status(200)]),
+                ..Default::default()
+            },
+            Permission::Push,
+        )
+        .await;
+    let (receipt, names) = runtime.create(&command).await;
+    assert_eq!(
+        receipt.outcome,
+        CreateOutcome::AlreadyPending {
+            upstream_id: 99,
+            permission: RepoRole::Write
+        },
+        "trace={:?}",
+        runtime.trace()
+    );
+    assert_stages(&names, true);
+    let trace = runtime.trace();
+    // The PUT's 201 carried the invitation at read: it changed nothing, so
+    // its generation is released and the next one PATCHes the invitation.
+    let puts = operations(&trace, "PUT", PUT_PATH);
+    let patches = operations(&trace, "PATCH", PATCH_PATH);
+    assert_eq!(puts.len(), 1);
+    assert_eq!(puts[0].fence, Some((1, 0)));
+    assert_eq!(patches.len(), 1);
+    assert_eq!(patches[0].fence, Some((2, 0)));
+    assert_eq!(runtime.fence(&command).await, Some((2, 0)));
+    let count = trace.len();
+    assert_eq!(runtime.create(&command).await.0, receipt);
+    assert_eq!(
+        runtime.trace().len(),
+        count,
+        "confirmed replay performs no GitHub calls"
+    );
     runtime.finish().await;
 }
 

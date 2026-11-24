@@ -398,6 +398,17 @@ async fn recover_fenced_write(
     .unwrap_or((CreateOutcome::OutcomeUnknown, None))
 }
 
+/// One write's answer. GitHub answers a PUT for a user with a pending
+/// invitation with 201 and that invitation unchanged, so an invitation that
+/// appeared after S1 comes back at its own role (`Raced`).
+enum Written {
+    Done(
+        CreateOutcome,
+        Option<ghinvite_core::delivery::InvitationTiming>,
+    ),
+    Raced(PendingInvitation),
+}
+
 async fn write_inner(
     app: &GithubApp,
     installation: u64,
@@ -455,6 +466,7 @@ async fn write_inner(
         return failed_budget_read(TokenCallError::Token(error), now, budget);
     }
     let repo = &repo;
+    let mut plan = plan;
     // Never replayed: a 401 replaces the token and ends this stage.
     let observed = app
         .write_once(installation, scope, |handle| async move {
@@ -484,7 +496,10 @@ async fn write_inner(
         }
         Err(_) => return blocked(BlockedReason::TargetUnavailable),
     }
-    for attempt in 0..2 {
+    // One write per claimed generation: at most one 401 retry, and one PATCH
+    // after a PUT that answered with a raced invitation.
+    let mut reauthorized = false;
+    for attempt in 0..3 {
         if attempt != 0
             && let Err(error) = app.ensure(installation, scope).await
         {
@@ -502,7 +517,7 @@ async fn write_inner(
             }
             Err(_) => return CreateOutcome::OutcomeUnknown,
         };
-        let plan = plan.clone();
+        let write = plan.clone();
         // One write per claimed generation, never replayed. A 401 has already
         // replaced the token, so the bounded retry below writes with a new one.
         let result = app
@@ -512,7 +527,7 @@ async fn write_inner(
                     owner: repo.owner(),
                     name: repo.name(),
                 };
-                let result = match plan {
+                let result = match write {
                     Plan::Put => {
                         endpoints::put_collaborator(&rest, repository, login, &wire_role(grant))
                             .await
@@ -521,21 +536,35 @@ async fn write_inner(
                                     CollaboratorWrite::Created {
                                         invitation_id,
                                         created_at,
-                                    } => (
-                                        CreateOutcome::Created {
-                                            upstream_id: invitation_id,
-                                        },
-                                        created_at.and_then(|at| {
+                                        permission,
+                                    } => {
+                                        let permission = observed_role(&permission)?;
+                                        let owned = permission == EffectiveRole::from(grant);
+                                        let timing = created_at.and_then(|at| {
                                             ghinvite_core::delivery::InvitationTiming::observed(
                                                 invitation_id,
                                                 at,
                                                 chrono::Utc::now(),
                                                 command.approved_at,
-                                                true,
+                                                owned,
                                             )
-                                        }),
-                                    ),
-                                    CollaboratorWrite::NoContent => (
+                                        });
+                                        if owned {
+                                            Written::Done(
+                                                CreateOutcome::Created {
+                                                    upstream_id: invitation_id,
+                                                },
+                                                timing,
+                                            )
+                                        } else {
+                                            Written::Raced(PendingInvitation {
+                                                timing,
+                                                upstream_id: invitation_id,
+                                                permission,
+                                            })
+                                        }
+                                    }
+                                    CollaboratorWrite::NoContent => Written::Done(
                                         CreateOutcome::Upgraded {
                                             from: before.clone(),
                                             to: grant,
@@ -567,7 +596,7 @@ async fn write_inner(
                                 what: "invitation_identity",
                             });
                         }
-                        Ok((
+                        Ok(Written::Done(
                             CreateOutcome::AlreadyPending {
                                 upstream_id,
                                 permission: grant,
@@ -587,16 +616,47 @@ async fn write_inner(
             })
             .await;
         let error = match result {
-            Ok((outcome, observed)) => {
+            Ok(Written::Done(outcome, observed)) => {
                 *timing = observed;
                 if matches!(outcome, CreateOutcome::Upgraded { .. }) {
                     budget.effect = BudgetEffect::RefundInvitation;
                 }
                 return outcome;
             }
+            // The PUT changed nothing: plan the invitation as if S1 had seen it.
+            Ok(Written::Raced(pending)) => {
+                let observed = pending.timing.clone();
+                let raced = PreRead::Ready {
+                    login: login.clone(),
+                    role: before.clone(),
+                    pending: Some(pending),
+                };
+                match self::plan(&raced, grant) {
+                    // Released inside S4 like a 401, so the next generation
+                    // PATCHes; a failed release leaves it to S5 and a later run.
+                    Plan::Patch { upstream_id } => {
+                        if storage
+                            .reject_delivery_attempt(command, generation)
+                            .await
+                            .is_err()
+                        {
+                            *rejected_generation = Some(generation);
+                            return blocked(BlockedReason::TargetUnavailable);
+                        }
+                        plan = Plan::Patch { upstream_id };
+                        continue;
+                    }
+                    Plan::Complete(outcome) => {
+                        *timing = observed;
+                        *rejected_generation = Some(generation);
+                        return outcome;
+                    }
+                    Plan::Put => unreachable!("a pending invitation is never PUT"),
+                }
+            }
             Err(error) => error,
         };
-        let bucket = match self::plan(read, grant) {
+        let bucket = match plan {
             Plan::Put => ghinvite_core::budget::BucketId::Repo {
                 repo_id: command.repo_id,
             },
@@ -607,7 +667,7 @@ async fn write_inner(
             TokenCallError::Call(CallError::Api(ApiError::Unauthorized)) => (
                 true,
                 blocked(BlockedReason::InstallationUnavailable),
-                attempt == 0,
+                !reauthorized,
             ),
             TokenCallError::Call(CallError::Api(ApiError::NotSent)) | TokenCallError::Token(_) => {
                 (true, failed_read(&error, now), false)
@@ -684,6 +744,7 @@ async fn write_inner(
         if !retry {
             return outcome;
         }
+        reauthorized = true;
     }
     unreachable!("bounded write attempts return")
 }

@@ -137,11 +137,23 @@ async fn repository_collaboration_end_to_end() {
     let CollaboratorWrite::Created {
         invitation_id,
         created_at,
-    } = created
+        permission,
+    } = created.clone()
     else {
         panic!("expected an invitation, got {created:?}");
     };
     assert!(created_at.is_some_and(|at| at <= emulator.now()));
+    assert_eq!(permission, RepoRole::Triage);
+    // A re-PUT while it is pending answers 201 with the same invitation
+    // at its original role: it does not change the role.
+    let again = invite!(app, |rest| endpoints::put_collaborator(
+        &rest,
+        WIDGETS,
+        "hubot",
+        &RepoRole::Admin
+    ))
+    .unwrap();
+    assert_eq!(again, created);
     let existing = invite!(app, |rest| endpoints::put_collaborator(
         &rest,
         WIDGETS,

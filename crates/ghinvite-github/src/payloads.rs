@@ -54,6 +54,10 @@ pub struct GhCollaboratorInvite {
     #[serde(default, deserialize_with = "advisory_time")]
     /// Provider creation time when present; absence must not be replaced with the local request time.
     pub created_at: Option<DateTime<Utc>>,
+    /// The invitation's role. A pending invitation keeps its own role whatever
+    /// the PUT asked, so this is the only evidence of what the 201 granted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<String>,
 }
 
 // Invalid optional display metadata cannot erase a successful invitation receipt.

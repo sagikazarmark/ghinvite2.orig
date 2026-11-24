@@ -205,12 +205,28 @@ async fn put_status_and_patch_wire_roles_are_distinct() {
     let mut created = Expectation::ok_json(
         Method::Put,
         "https://api.github.test/repos/acme/api/collaborators/alice",
-        json!({"id":99}),
+        json!({"id":99,"permissions":"write"}),
     )
     .require_body(br#"{"permission":"push"}"#.to_vec());
     created.response.status = 201;
+    // A pending invitation keeps its own role: the 201 reports it.
+    let mut existing = Expectation::ok_json(
+        Method::Put,
+        "https://api.github.test/repos/acme/api/collaborators/alice",
+        json!({"id":98,"permissions":"read"}),
+    )
+    .require_body(br#"{"permission":"push"}"#.to_vec());
+    existing.response.status = 201;
+    let mut unreported = Expectation::ok_json(
+        Method::Put,
+        "https://api.github.test/repos/acme/api/collaborators/alice",
+        json!({"id":97}),
+    );
+    unreported.response.status = 201;
     let mock = MockTransport::scripted(vec![
         created,
+        existing,
+        unreported,
         Expectation::status(
             Method::Put,
             "https://api.github.test/repos/acme/api/collaborators/alice",
@@ -237,8 +253,26 @@ async fn put_status_and_patch_wire_roles_are_distinct() {
             .unwrap(),
         CollaboratorWrite::Created {
             invitation_id: 99,
-            created_at: None
+            created_at: None,
+            permission: RepoRole::Write,
         }
+    );
+    assert_eq!(
+        put_collaborator(&rest, REPO, "alice", &RepoRole::Write)
+            .await
+            .unwrap(),
+        CollaboratorWrite::Created {
+            invitation_id: 98,
+            created_at: None,
+            permission: RepoRole::Read,
+        }
+    );
+    // Without its role a 201 proves no grant.
+    assert_eq!(
+        put_collaborator(&rest, REPO, "alice", &RepoRole::Write).await,
+        Err(ApiError::Decode {
+            what: "invitation_permission"
+        })
     );
     assert_eq!(
         put_collaborator(&rest, REPO, "alice", &RepoRole::Read)

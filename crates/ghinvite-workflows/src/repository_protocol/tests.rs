@@ -49,7 +49,7 @@ fn put(status: u16) -> Expectation {
         Method::Put,
         "https://api.github.test/repos/acme/api/collaborators/alice",
         if status == 201 {
-            json!({"id":99})
+            json!({"id":99,"permissions":"write"})
         } else {
             json!({"message":"rejected-fixture-marker"})
         },
@@ -393,6 +393,118 @@ async fn lower_pending_is_patched_and_204_records_an_upgrade() {
         }
     );
     mock.assert_exhausted();
+}
+
+/// A PUT's 201 for an invitation that appeared after S1 carries it at its
+/// own role (GitHub keeps a pending invitation's role whatever the PUT
+/// asks), so it is planned like a pending invitation found by S1.
+#[tokio::test]
+async fn raced_pending_invitation_in_a_put_201_is_planned_like_a_pending_one() {
+    fn raced(permission: &str) -> Expectation {
+        let mut e = put(201);
+        e.response.body = serde_json::to_vec(&json!({"id":77,"permissions":permission})).unwrap();
+        e
+    }
+    let mut patch = Expectation::ok_json(
+        Method::Patch,
+        "https://api.github.test/repos/acme/api/invitations/77",
+        json!({"id":77,"invitee":{"id":8,"login":"alice"},"permissions":"write","created_at":"2026-10-15T00:00:00Z","expired":false}),
+    );
+    patch.expected_body = Some(br#"{"permissions":"write"}"#.to_vec());
+
+    // Lower: the PUT changed nothing, so its generation is released and the
+    // next one PATCHes the invitation.
+    let storage = SqlxStorage::in_memory().await.unwrap();
+    let command = command();
+    let (app, _tokens, mock) = github(vec![permission("read"), raced("read"), patch.clone()]);
+    let result = write_stage(
+        &app,
+        9,
+        &storage,
+        &command,
+        &ready(EffectiveRole::Read, None),
+        now(),
+    )
+    .await;
+    assert_eq!(
+        result.outcome,
+        CreateOutcome::AlreadyPending {
+            upstream_id: 77,
+            permission: RepoRole::Write
+        }
+    );
+    assert_eq!(result.rejected_generation, None);
+    assert_eq!(result.timing.map(|t| t.upstream_id), Some(77));
+    storage.reject_delivery_attempt(&command, 2).await.unwrap();
+    assert_eq!(
+        storage.claim_delivery_attempt(&command).await.unwrap(),
+        Some(3)
+    );
+    mock.assert_exhausted();
+
+    // After a 401 the reminted token PUTs, then PATCHes once more.
+    let storage = SqlxStorage::in_memory().await.unwrap();
+    let (app, tokens, mock) = github(vec![
+        permission("read"),
+        put(401).require_header("authorization", bearer(1)),
+        raced("read").require_header("authorization", bearer(2)),
+        patch.require_header("authorization", bearer(2)),
+    ]);
+    assert_eq!(
+        write(
+            &app,
+            9,
+            &storage,
+            &command,
+            &ready(EffectiveRole::Read, None),
+            now()
+        )
+        .await,
+        CreateOutcome::AlreadyPending {
+            upstream_id: 77,
+            permission: RepoRole::Write
+        }
+    );
+    storage.reject_delivery_attempt(&command, 3).await.unwrap();
+    assert_eq!(
+        storage.claim_delivery_attempt(&command).await.unwrap(),
+        Some(4)
+    );
+    assert_eq!(tokens.generation(9, &profiles::REPO_INVITE), 2);
+    mock.assert_exhausted();
+
+    // Higher or custom: never lowered, never PATCHed; the PUT's generation
+    // is released after the outcome is journaled.
+    for (role, expected) in [
+        (
+            "admin",
+            CreateOutcome::AlreadyPending {
+                upstream_id: 77,
+                permission: RepoRole::Admin,
+            },
+        ),
+        (
+            "security-reviewer",
+            CreateOutcome::SkippedCustomRole {
+                role_name: CustomRoleName::new("security-reviewer").unwrap(),
+            },
+        ),
+    ] {
+        let storage = SqlxStorage::in_memory().await.unwrap();
+        let (app, _tokens, mock) = github(vec![permission("read"), raced(role)]);
+        let result = write_stage(
+            &app,
+            9,
+            &storage,
+            &command,
+            &ready(EffectiveRole::Read, None),
+            now(),
+        )
+        .await;
+        assert_eq!(result.outcome, expected);
+        assert_eq!(result.rejected_generation, Some(1));
+        mock.assert_exhausted();
+    }
 }
 
 async fn write(

@@ -541,15 +541,19 @@ pub struct RepoInvitation {
 }
 
 /// The successful outcomes of a collaborator PUT.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CollaboratorWrite {
-    /// 201: GitHub created an invitation rather than granting access.
+    /// 201: an invitation rather than access. For a user with a pending
+    /// invitation GitHub answers 201 with that invitation unchanged, so
+    /// `permission` may differ from the requested role.
     Created {
-        /// The new invitation's ID.
+        /// The invitation's ID.
         invitation_id: u64,
         /// GitHub's creation time when present; never a local substitute.
         created_at: Option<chrono::DateTime<chrono::Utc>>,
+        /// The invitation's role as GitHub reports it.
+        permission: RepoRole,
     },
     /// 204: no new invitation; no identifier is inferred.
     NoContent,
@@ -583,7 +587,8 @@ fn grant(role: &RepoRole, patch: bool) -> Result<&'static str, ApiError> {
 }
 
 /// Set a collaborator's built-in role, keeping invitation-created (201)
-/// distinct from no-content (204).
+/// distinct from no-content (204). A 201 without the invitation's role is
+/// not decoded: the caller must compare it with the requested role.
 pub async fn put_collaborator(
     rest: &Rest<'_>,
     repo: Repository<'_>,
@@ -602,6 +607,11 @@ pub async fn put_collaborator(
         (201, Some(invitation)) => Ok(CollaboratorWrite::Created {
             invitation_id: invitation.id,
             created_at: invitation.created_at,
+            permission: RepoRole::parse(invitation.permissions.as_deref().ok_or(
+                ApiError::Decode {
+                    what: "invitation_permission",
+                },
+            )?),
         }),
         (204, None) => Ok(CollaboratorWrite::NoContent),
         _ => Err(ApiError::Decode {
