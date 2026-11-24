@@ -23,6 +23,12 @@ service has not been registered.
   acknowledgement or the subsequent HTTP result is lost, recovery reads GitHub
   evidence and never repeats that PUT. This deliberately permits conservative
   outcome-unknown results even when a crash occurred before the HTTP send.
+  A PUT whose 201 carries a pending invitation at another role changed
+  nothing: GitHub answers a PUT for a user with a pending invitation with that
+  invitation unchanged, so it appeared after the pre-read. S4 plans it like a
+  pending invitation the pre-read found: a lower one is PATCHed under the next
+  generation after releasing this one, as for a 401; a higher or custom one
+  completes without a write.
   An explicit rejection releases only that exact generation for a later
   availability/rate-limit retry: a 401/403/404 refusing access, or any throttled
   refusal (see **GitHub throttling**), which a 429 always is. A stale rejection

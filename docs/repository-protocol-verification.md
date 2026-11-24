@@ -30,6 +30,18 @@ toolkit library tests also pass (`/tmp/p1-policy-protocol-unit.log`,
 | Successful PUT followed by three forced journal acknowledgement losses | Three actual guarded run errors; positive read-only invitation recovery; Created; exactly one PUT |
 | HTTP timeout with no invitation evidence, followed by three create calls | OutcomeUnknown on every call; generation 1 retained; exactly one PUT |
 | Positive outside-policy 403/422 and IP-denial 403 | Typed blocked reason; generation 1 released after retained rejection; later recheck uses generation 2 and one PUT per invocation; no upstream policy text or marker in create journals |
+| Read invitation appears after S1; the PUT answers 201 with it, target write | Generation 1 released inside S4; exactly one PATCH under generation 2; AlreadyPending write; confirmed replay adds no calls |
+
+GitHub answers a PUT for a user with a pending invitation with 201 and that
+invitation at its original permission (measured live on 2026-11-24; octoemu
+`reput-pending-invitation`). The last row (added 2026-11-24, `invitation_raced_in_before_the_put_is_patched_to_the_grant`)
+covers that answer for an invitation that appeared between S1's listing and
+the PUT: S4 compares the 201's `permissions` with the target and plans a
+different one as S2 plans a pending invitation. Before this, the write stage
+recorded it as `Created` at the target. The unit suite also covers the 401,
+higher (`AlreadyPending` admin, no PATCH) and custom-role variants. The full
+target passed 68 tests against `restate-server` 1.8.1, including the AC-DLV-3
+generated sequences, whose 201 carries the target role and is unchanged.
 
 The fixture records nonsecret HTTP operations, profile/generation identities,
 and the SQL fence visible during each request. Confirmed replay adds no GitHub

@@ -497,7 +497,8 @@ An expected deadline never settles a delivery or authorizes cancellation.
 
 The repository's typed 201 response treats a missing or malformed optional
 creation timestamp as unavailable metadata while retaining the successful
-invitation outcome. A later complete identity-bound listing may add the first
+invitation outcome. Its `permissions` is not optional: a 201 can carry a
+pending invitation at its original role, so one without it is not decoded. A later complete identity-bound listing may add the first
 valid timing at a newer snapshot revision without rewriting its create receipt.
 Organization creation already returns a validated upstream timestamp; the owner
 pairs it with its retained control policy. Existing strict invitation list/PATCH
