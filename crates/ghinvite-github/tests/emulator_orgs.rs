@@ -159,7 +159,8 @@ async fn accept(emulator: &Emulator, login: &str) {
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), 200);
+    // GitHub answers the accept with 202, the membership already active.
+    assert_eq!(response.status(), 202);
 }
 
 async fn admin(emulator: &Emulator, path: &str, body: Value) -> u16 {
