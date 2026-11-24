@@ -456,8 +456,8 @@ impl Ctx {
 
     /// A JWT over `header` and `claims`, signed RS256 with `pem`.
     pub fn sign_with(pem: &str, header: &Value, claims: &Value) -> Result<String, Stop> {
-        let key = rsa::RsaPrivateKey::from_pkcs8_pem(pem)
-            .or_else(|_| rsa::RsaPrivateKey::from_pkcs1_pem(pem))
+        let key = rsa::PrivateKey::from_pkcs8_pem(pem)
+            .or_else(|_| rsa::PrivateKey::from_pkcs1_pem(pem))
             .map_err(|error| Stop::Fail(format!("the App private key: {error}")))?;
         let input = format!(
             "{}.{}",

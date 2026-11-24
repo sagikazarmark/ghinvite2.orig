@@ -25,21 +25,21 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 futures-util = { version = "0.3", default-features = false }
 getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
 # octoemu only (native): signs its installation tokens (HS256).
-hmac = "0.12"
+hmac = "0.13"
 http = "1"
 js-sys = "0.3"
-jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto", "use_pem"] }
+jsonwebtoken = { version = "12", default-features = false, features = ["rust_crypto", "use_pem"] }
 octocrab = { version = "0.54.5", default-features = false }
 regex = "1.12.2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
 reqwest-middleware = { version = "0.4", default-features = false }
-rsa = { version = "0.9", default-features = false, features = ["std", "pem", "sha2"] }
+rsa = { version = "0.10", default-features = false, features = ["std", "encoding", "pkcs1v15"] }
 send_wrapper = { version = "0.6", features = ["futures"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # octoemu only (native): the legacy `X-Hub-Signature` (HMAC-SHA1) on webhooks.
-sha1 = "0.10"
-sha2 = "0.10"
+sha1 = "0.11"
+sha2 = "0.11"
 static_assertions = "1.1.0"
 subtle = "2.6.1"
 thiserror = "2"

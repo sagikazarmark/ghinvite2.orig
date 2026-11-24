@@ -301,7 +301,7 @@ The test suites themselves run natively only: wiremock and tokio's `net` feature
 
 **G2-04 notes:**
 - **Location.** The examples live in `octotoken`, the crate that sees both crates. Each is registered with `test = true` and tested against a wiremock GitHub.
-- **octocrab as a dev-dependency.** It is native-only, with `default-client`, `rustls`, `rustls-ring`, `timeout` and `jwt-rust-crypto`. Leaving out `retry` and `follow-redirect` is how the example disables both.
+- **octocrab as a dev-dependency.** It is native-only, with `default-client`, `rustls`, `rustls-ring` and `timeout` (`jwt-rust-crypto` was dropped on 2026-11-24: octotoken mints the tokens, and it pulled `jsonwebtoken` 10 with `rsa` 0.9). Leaving out `retry` and `follow-redirect` is how the example disables both.
 - **The 401 test** checks that each request carries exactly one `Authorization` header.
 - **Bridge caveat:** octocrab puts a non-JSON body's raw text in `message`. Such a body then names a reason, unlike in the `Bytes` path. The effect: a 403 with an exhausted quota and an HTML body is `Forbidden` through octocrab but `RateLimited` through `Bytes`.
 

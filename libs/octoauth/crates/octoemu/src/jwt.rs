@@ -135,8 +135,8 @@ fn verifies(app: &App, signing_input: &str, signature: &[u8]) -> bool {
     };
     app.public_keys.iter().any(|pem| {
         let pem = pem.trim();
-        let key = rsa::RsaPublicKey::from_public_key_pem(pem)
-            .or_else(|_| rsa::RsaPublicKey::from_pkcs1_pem(pem));
+        let key = rsa::PublicKey::from_public_key_pem(pem)
+            .or_else(|_| rsa::PublicKey::from_pkcs1_pem(pem));
         key.is_ok_and(|key| {
             VerifyingKey::<Sha256>::new(key)
                 .verify(signing_input.as_bytes(), &signature)

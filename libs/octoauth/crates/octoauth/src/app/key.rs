@@ -2,7 +2,7 @@
 //! implementation, [`SigningKey`].
 
 use crate::error::{ConfigError, SigningError};
-use rsa::RsaPrivateKey;
+use rsa::PrivateKey;
 use rsa::pkcs1::DecodeRsaPrivateKey;
 use rsa::pkcs1v15;
 use rsa::pkcs8::DecodePrivateKey;
@@ -66,10 +66,10 @@ impl SigningKey {
             return Err(ConfigError::new("signing_key", "length"));
         }
         let pem = Zeroizing::new(pem.trim().to_owned());
-        let key = RsaPrivateKey::from_pkcs8_pem(&pem)
-            .or_else(|_| RsaPrivateKey::from_pkcs1_pem(&pem))
+        let key = PrivateKey::from_pkcs8_pem(&pem)
+            .or_else(|_| PrivateKey::from_pkcs1_pem(&pem))
             .map_err(|_| ConfigError::new("signing_key", "pem"))?;
-        if !(2048..=4096).contains(&key.n().bits()) {
+        if !(2048..=4096).contains(&key.n().bit_width()) {
             return Err(ConfigError::new("signing_key", "modulus"));
         }
         key.validate()
@@ -84,13 +84,13 @@ impl SigningKey {
         self.rsa().size()
     }
 
-    fn rsa(&self) -> &RsaPrivateKey {
+    fn rsa(&self) -> &PrivateKey {
         self.inner.as_ref()
     }
 
     /// The public half, for verifying signatures in tests.
     #[cfg(test)]
-    pub(crate) fn public_key(&self) -> rsa::RsaPublicKey {
+    pub(crate) fn public_key(&self) -> rsa::PublicKey {
         self.rsa().to_public_key()
     }
 }

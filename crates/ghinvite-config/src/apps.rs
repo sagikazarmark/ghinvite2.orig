@@ -708,7 +708,7 @@ mod installed_app_tests {
         let signature = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(signature)
             .unwrap();
-        let public = rsa::RsaPrivateKey::from_pkcs8_pem(pem)
+        let public = rsa::PrivateKey::from_pkcs8_pem(pem)
             .unwrap()
             .to_public_key();
         let verified = VerifyingKey::<rsa::sha2::Sha256>::new(public)

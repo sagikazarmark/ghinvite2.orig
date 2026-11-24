@@ -46,8 +46,9 @@ wiremock.workspace = true
 # The examples' clients. Native only: the examples run as tests against a
 # local GitHub stand-in.
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-# No `retry` and no `follow-redirect`: see examples/octocrab.rs.
-octocrab = { workspace = true, features = ["default-client", "rustls", "rustls-ring", "timeout", "jwt-rust-crypto"] }
+# No `retry` and no `follow-redirect`: see examples/octocrab.rs. No `jwt`
+# either: octotoken mints the tokens, so octocrab never signs an App JWT.
+octocrab = { workspace = true, features = ["default-client", "rustls", "rustls-ring", "timeout"] }
 
 [[example]]
 name = "octocrab"

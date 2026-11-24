@@ -2526,8 +2526,8 @@ fn team_cycle(seed: &Seed, team: &Team) -> bool {
 fn is_rsa_public_key(pem: &str) -> bool {
     use rsa::pkcs1::DecodeRsaPublicKey;
     use rsa::pkcs8::DecodePublicKey;
-    rsa::RsaPublicKey::from_public_key_pem(pem.trim()).is_ok()
-        || rsa::RsaPublicKey::from_pkcs1_pem(pem.trim()).is_ok()
+    rsa::PublicKey::from_public_key_pem(pem.trim()).is_ok()
+        || rsa::PublicKey::from_pkcs1_pem(pem.trim()).is_ok()
 }
 
 fn is_http_url(url: &str) -> bool {

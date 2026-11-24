@@ -93,7 +93,7 @@ fn invite_permissions() -> Permissions {
 
 /// A JWT signed with `pem` (RS256 unless `header` says otherwise).
 fn jwt_with(pem: &str, header: &Value, claims: &Value) -> String {
-    let key = RsaSigningKey::<sha2::Sha256>::new(rsa::RsaPrivateKey::from_pkcs8_pem(pem).unwrap());
+    let key = RsaSigningKey::<sha2::Sha256>::new(rsa::PrivateKey::from_pkcs8_pem(pem).unwrap());
     let input = format!(
         "{}.{}",
         URL_SAFE_NO_PAD.encode(header.to_string()),

@@ -10,7 +10,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode as AxumStatus};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use octoemu::Emulator;
 use octoemu::seed::{
     Access, App, Installation, Membership, Org, OrgRole, Repo, RepositoryInvitation, Role, Seed,
@@ -230,8 +230,7 @@ async fn settle(emulator: &Emulator) {
 
 /// An App JWT for App `app_id` on the emulator's clock.
 fn jwt(emulator: &Emulator, app_id: u64) -> String {
-    let key =
-        RsaSigningKey::<Sha256>::new(rsa::RsaPrivateKey::from_pkcs8_pem(PRIVATE_KEY).unwrap());
+    let key = RsaSigningKey::<Sha256>::new(rsa::PrivateKey::from_pkcs8_pem(PRIVATE_KEY).unwrap());
     let now = emulator.now().timestamp();
     let input = format!(
         "{}.{}",

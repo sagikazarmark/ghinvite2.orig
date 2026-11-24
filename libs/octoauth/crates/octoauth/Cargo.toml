@@ -35,10 +35,9 @@ zeroize.workspace = true
 # Cloudflare Workers and other wasm32-unknown-unknown (JavaScript) hosts.
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 # `SystemClock` reads JavaScript `Date.now()`: `SystemTime::now()` panics here.
+# No getrandom backend is needed: `rsa` is built without its `getrandom`
+# feature, and PKCS#1 v1.5 signing draws no randomness.
 js-sys.workspace = true
-# Not used directly: `rsa` reaches getrandom 0.2 (num-bigint-dig -> rand),
-# which needs its JS backend selected. PKCS#1 v1.5 signing draws no randomness.
-getrandom_02.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
