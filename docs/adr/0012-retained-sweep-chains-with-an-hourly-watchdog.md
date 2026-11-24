@@ -99,8 +99,11 @@ across the wait; the 24-hour cap below is the only upper bound. Any other
 read failure, including the page cap, counts as *failed*. Each run counts at most
 once per kind, and a report for any run but the latest is ignored. A throttled
 run defers the chain by `min(24 h, max(guidance, 1 h × 2^(n−1)))`, where n is the
-number of consecutive throttled runs. If that is later than the next run, the
-chain is re-armed at that time. Until the deferral ends, registrations cannot
+number of consecutive throttled runs. A later throttled report from the same
+run still counts once, but extends the deferral when its own guidance ends
+later, so the chain waits for the longest guidance any target of that run
+received. If the deferral is later than the next run, the chain is re-armed at
+that time. Until the deferral ends, registrations cannot
 pull the chain forward. The first run that is not throttled resets n.
 
 **Digest.** Each complete check is recorded in `sweep_digest_days` (migration

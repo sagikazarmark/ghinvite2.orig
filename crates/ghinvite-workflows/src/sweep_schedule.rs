@@ -161,6 +161,21 @@ pub fn deferral_seconds(deferrals: u32, retry_after_seconds: u64) -> u64 {
         .min(IDLE_SECONDS)
 }
 
+/// A later throttle report from a run already deferred: the deadline its own
+/// guidance needs, when that ends after the current one. The run's backoff
+/// was applied by its first report, so only GitHub's guidance can extend it,
+/// still within the idle cadence.
+pub fn extended_deferral(
+    deferred_until: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+    retry_after_seconds: u64,
+) -> Option<DateTime<Utc>> {
+    let until = now + chrono::Duration::seconds(retry_after_seconds.min(IDLE_SECONDS) as i64);
+    deferred_until
+        .is_none_or(|current| until > current)
+        .then_some(until)
+}
+
 fn cadence(state: &Schedule) -> u64 {
     if state.tracked.is_empty() {
         IDLE_SECONDS
@@ -528,6 +543,20 @@ impl SweepSchedule {
                 retry_after_seconds,
             } => {
                 if state.health.last_throttled_token == Some(input.token) {
+                    // Counted once per run, but a target throttled for longer
+                    // than the first one still holds the whole chain back.
+                    let now = self.now(&ctx, "report_time").await?;
+                    let Some(until) =
+                        extended_deferral(state.health.deferred_until, now, retry_after_seconds)
+                    else {
+                        return Ok(());
+                    };
+                    state.health.deferred_until = Some(until);
+                    if state.next_run.is_some_and(|at| at < until) {
+                        let seconds = (until - now).num_seconds().max(0) as u64;
+                        return self.arm(&ctx, &mut state, now, seconds).await;
+                    }
+                    ctx.set("schedule", Json(state));
                     return Ok(());
                 }
                 let now = self.now(&ctx, "report_time").await?;
@@ -629,6 +658,28 @@ mod tests {
         assert_eq!(deferral_seconds(6, 0), IDLE_SECONDS);
         assert_eq!(deferral_seconds(u32::MAX, 0), IDLE_SECONDS);
         assert_eq!(deferral_seconds(1, 3 * ACTIVE_SECONDS), 3 * ACTIVE_SECONDS);
+    }
+    #[test]
+    fn a_later_throttle_report_extends_the_run_deferral_only_when_longer() {
+        let now: DateTime<Utc> = "2026-11-24T12:05:00Z".parse().unwrap();
+        let deferred = now + chrono::Duration::hours(1);
+        // Shorter or equal guidance keeps the deadline.
+        assert_eq!(extended_deferral(Some(deferred), now, 1800), None);
+        assert_eq!(extended_deferral(Some(deferred), now, ACTIVE_SECONDS), None);
+        assert_eq!(extended_deferral(Some(deferred), now, 0), None);
+        // Longer guidance moves it out, capped at the idle cadence.
+        assert_eq!(
+            extended_deferral(Some(deferred), now, 6 * ACTIVE_SECONDS),
+            Some(now + chrono::Duration::hours(6))
+        );
+        assert_eq!(
+            extended_deferral(Some(deferred), now, 3 * IDLE_SECONDS),
+            Some(now + chrono::Duration::hours(24))
+        );
+        assert_eq!(
+            extended_deferral(None, now, 60),
+            Some(now + chrono::Duration::seconds(60))
+        );
     }
     #[test]
     fn failures_are_reported_for_one_day() {
