@@ -80,7 +80,9 @@ impl OrganizationObservation {
     /// lifetime to the failed list. This complete observation shows `upstream_id`
     /// expired when it still lists the invitation, pending or failed, more than
     /// 7 days after creation. A failure GitHub stamped before that lifetime ended
-    /// failed for another reason and stays unclassified; absence is never expiry.
+    /// failed for another reason: it stays unclassified and takes precedence
+    /// over a pending entry for the same invitation, since the two sequential
+    /// list reads then disagree. Absence is never expiry.
     pub fn expired(&self, upstream_id: u64) -> bool {
         let lifetime = chrono::Duration::seconds(i64::from(
             crate::delivery::GITHUB_INVITATION_LIFETIME_SECONDS,
@@ -88,19 +90,26 @@ impl OrganizationObservation {
         let past = |created_at| {
             crate::delivery::past_github_lifetime(created_at, self.observation_started_at)
         };
+        let failed_early = |f: &FailedOrganizationInvitation| {
+            f.failed_at.is_some_and(|failed_at| {
+                f.invitation
+                    .created_at
+                    .checked_add_signed(lifetime)
+                    .is_none_or(|expiry| failed_at < expiry)
+            })
+        };
+        let failed = self
+            .failed
+            .iter()
+            .filter(|f| f.invitation.upstream_id == upstream_id)
+            .collect::<Vec<_>>();
+        if failed.iter().any(|f| failed_early(f)) {
+            return false;
+        }
         self.pending
             .iter()
             .any(|i| i.upstream_id == upstream_id && past(i.created_at))
-            || self.failed.iter().any(|f| {
-                f.invitation.upstream_id == upstream_id
-                    && past(f.invitation.created_at)
-                    && f.failed_at.is_none_or(|failed_at| {
-                        f.invitation
-                            .created_at
-                            .checked_add_signed(lifetime)
-                            .is_some_and(|expiry| failed_at >= expiry)
-                    })
-            })
+            || failed.iter().any(|f| past(f.invitation.created_at))
     }
 }
 
@@ -173,6 +182,27 @@ mod tests {
             !value.expired(99),
             "a failed entry inside its lifetime is not yet expiry"
         );
+        // The pending and failed reads can disagree about one invitation. An
+        // early failure wins over pending presence past the lifetime; a
+        // failure at the expiry agrees with it.
+        value.observation_started_at = created + lifetime + chrono::Duration::seconds(1);
+        value.observed_at = value.observation_started_at;
+        value.pending = vec![pending.clone()];
+        for (failed_at, expired) in [
+            (Some(created + lifetime - chrono::Duration::hours(1)), false),
+            (Some(created + lifetime), true),
+            (None, true),
+        ] {
+            value.failed = vec![FailedOrganizationInvitation {
+                invitation: pending.clone(),
+                failed_at,
+            }];
+            assert!(
+                value.validate().is_ok(),
+                "the overlap is a valid observation"
+            );
+            assert_eq!(value.expired(99), expired, "overlap {failed_at:?}");
+        }
     }
     #[test]
     fn failed_list_preserves_ambiguity_without_inventing_an_expiry_reason() {
