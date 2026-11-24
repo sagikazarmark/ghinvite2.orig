@@ -1,16 +1,14 @@
 {
   "scenario": "api-version-unsupported",
-  "source": "emulator (unverified)",
-  "note": "Generated from octoemu, not GitHub: unverified. The first live run (record mode) overwrites this file; any diff it shows is the fidelity signal.",
+  "source": "live",
+  "recorded": "2026-11-24",
   "steps": [
     {
       "step": "version-2022-11-28",
       "request": "GET /app",
       "status": 200,
       "headers": {
-        "content-type": "application/json; charset=utf-8",
-        "x-ratelimit-remaining": "<n>",
-        "x-ratelimit-resource": "core"
+        "content-type": "application/json; charset=utf-8"
       },
       "body": {
         "client_id": "<app-client-id>",
@@ -18,13 +16,13 @@
         "description": "<varies>",
         "events": [
           "member",
-          "organization",
-          "membership"
+          "membership",
+          "organization"
         ],
-        "external_url": "<origin>/apps/<app>",
+        "external_url": "<origin>/<org>",
         "html_url": "<origin>/apps/<app>",
         "id": "<app-id>",
-        "installations_count": 3,
+        "installations_count": 1,
         "name": "<varies>",
         "node_id": "<node-id>",
         "owner": {
@@ -45,7 +43,8 @@
           "starred_url": "<origin>/users/<org>/starred{/owner}{/repo}",
           "subscriptions_url": "<origin>/users/<org>/subscriptions",
           "type": "Organization",
-          "url": "<origin>/users/<org>"
+          "url": "<origin>/users/<org>",
+          "user_view_type": "public"
         },
         "permissions": {
           "administration": "write",
@@ -61,9 +60,7 @@
       "request": "GET /app",
       "status": 200,
       "headers": {
-        "content-type": "application/json; charset=utf-8",
-        "x-ratelimit-remaining": "<n>",
-        "x-ratelimit-resource": "core"
+        "content-type": "application/json; charset=utf-8"
       },
       "body": {
         "client_id": "<app-client-id>",
@@ -71,13 +68,13 @@
         "description": "<varies>",
         "events": [
           "member",
-          "organization",
-          "membership"
+          "membership",
+          "organization"
         ],
-        "external_url": "<origin>/apps/<app>",
+        "external_url": "<origin>/<org>",
         "html_url": "<origin>/apps/<app>",
         "id": "<app-id>",
-        "installations_count": 3,
+        "installations_count": 1,
         "name": "<varies>",
         "node_id": "<node-id>",
         "owner": {
@@ -98,7 +95,8 @@
           "starred_url": "<origin>/users/<org>/starred{/owner}{/repo}",
           "subscriptions_url": "<origin>/users/<org>/subscriptions",
           "type": "Organization",
-          "url": "<origin>/users/<org>"
+          "url": "<origin>/users/<org>",
+          "user_view_type": "public"
         },
         "permissions": {
           "administration": "write",
@@ -114,13 +112,13 @@
       "request": "GET /app",
       "status": 400,
       "headers": {
-        "content-type": "application/json; charset=utf-8",
-        "x-ratelimit-remaining": "<n>",
-        "x-ratelimit-resource": "core"
+        "content-type": "application/json; charset=utf-8"
       },
       "body": {
-        "documentation_url": "https://docs.github.com/rest/about-the-rest-api/api-versions",
-        "message": "Unsupported API version 2021-01-01"
+        "documentation_url": "https://docs.github.com/rest",
+        "errors": "The version you specified in the \"X-GitHub-API-Version\" request header, \"2021-01-01\", is not a supported version. The following versions are currently supported: \"2026-03-10\" (most recent) and \"2022-11-28\".",
+        "message": "Bad Request",
+        "status": "400"
       }
     },
     {
@@ -128,13 +126,13 @@
       "request": "GET /app",
       "status": 400,
       "headers": {
-        "content-type": "application/json; charset=utf-8",
-        "x-ratelimit-remaining": "<n>",
-        "x-ratelimit-resource": "core"
+        "content-type": "application/json; charset=utf-8"
       },
       "body": {
-        "documentation_url": "https://docs.github.com/rest/about-the-rest-api/api-versions",
-        "message": "Unsupported API version 2099-01-01"
+        "documentation_url": "https://docs.github.com/rest",
+        "errors": "The version you specified in the \"X-GitHub-API-Version\" request header, \"2099-01-01\", is not a supported version. The following versions are currently supported: \"2026-03-10\" (most recent) and \"2022-11-28\".",
+        "message": "Bad Request",
+        "status": "400"
       }
     },
     {
@@ -142,13 +140,13 @@
       "request": "GET /app",
       "status": 400,
       "headers": {
-        "content-type": "application/json; charset=utf-8",
-        "x-ratelimit-remaining": "<n>",
-        "x-ratelimit-resource": "core"
+        "content-type": "application/json; charset=utf-8"
       },
       "body": {
-        "documentation_url": "https://docs.github.com/rest/about-the-rest-api/api-versions",
-        "message": "Unsupported API version latest"
+        "documentation_url": "https://docs.github.com/rest",
+        "errors": "The version you specified in the \"X-GitHub-API-Version\" request header, \"latest\", is not a supported version. The following versions are currently supported: \"2026-03-10\" (most recent) and \"2022-11-28\".",
+        "message": "Bad Request",
+        "status": "400"
       }
     },
     {
@@ -161,8 +159,10 @@
         "x-ratelimit-resource": "core"
       },
       "body": {
-        "documentation_url": "https://docs.github.com/rest/about-the-rest-api/api-versions",
-        "message": "Unsupported API version 2021-01-01"
+        "documentation_url": "https://docs.github.com/rest",
+        "errors": "The version you specified in the \"X-GitHub-API-Version\" request header, \"2021-01-01\", is not a supported version. The following versions are currently supported: \"2026-03-10\" (most recent) and \"2022-11-28\".",
+        "message": "Bad Request",
+        "status": "400"
       }
     }
   ]

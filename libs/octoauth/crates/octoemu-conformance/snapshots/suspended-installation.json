@@ -1,7 +1,7 @@
 {
   "scenario": "suspended-installation",
-  "source": "emulator (unverified)",
-  "note": "Generated from octoemu, not GitHub: unverified. The first live run (record mode) overwrites this file; any diff it shows is the fidelity signal.",
+  "source": "live",
+  "recorded": "2026-11-24",
   "steps": [
     {
       "step": "use-before",
@@ -9,11 +9,17 @@
       "status": 200,
       "headers": {
         "content-type": "application/json; charset=utf-8",
+        "x-accepted-github-permissions": "metadata=read",
         "x-ratelimit-remaining": "<n>",
         "x-ratelimit-resource": "core"
       },
       "body": {
-        "allow_forking": true,
+        "allow_auto_merge": false,
+        "allow_forking": false,
+        "allow_merge_commit": true,
+        "allow_rebase_merge": true,
+        "allow_squash_merge": true,
+        "allow_update_branch": false,
         "archive_url": "<origin>/repos/<org>/<repo>/{archive_format}{/ref}",
         "archived": false,
         "assignees_url": "<origin>/repos/<org>/<repo>/assignees{/user}",
@@ -27,7 +33,9 @@
         "contents_url": "<origin>/repos/<org>/<repo>/contents/{+path}",
         "contributors_url": "<origin>/repos/<org>/<repo>/contributors",
         "created_at": "<timestamp>",
+        "custom_properties": {},
         "default_branch": "main",
+        "delete_branch_on_merge": false,
         "deployments_url": "<origin>/repos/<org>/<repo>/deployments",
         "description": "<varies>",
         "disabled": false,
@@ -43,11 +51,12 @@
         "git_tags_url": "<origin>/repos/<org>/<repo>/git/tags{/sha}",
         "git_url": "<git-origin>/<org>/<repo>.git",
         "has_discussions": false,
-        "has_downloads": true,
+        "has_downloads": false,
         "has_issues": true,
         "has_pages": false,
         "has_projects": true,
-        "has_wiki": true,
+        "has_pull_requests": true,
+        "has_wiki": false,
         "homepage": "<varies>",
         "hooks_url": "<origin>/repos/<org>/<repo>/hooks",
         "html_url": "<origin>/<org>/<repo>",
@@ -61,6 +70,8 @@
         "language": "<varies>",
         "languages_url": "<origin>/repos/<org>/<repo>/languages",
         "license": null,
+        "merge_commit_message": "PR_TITLE",
+        "merge_commit_title": "MERGE_MESSAGE",
         "merges_url": "<origin>/repos/<org>/<repo>/merges",
         "milestones_url": "<origin>/repos/<org>/<repo>/milestones{/number}",
         "mirror_url": null,
@@ -88,7 +99,8 @@
           "starred_url": "<origin>/users/<org>/starred{/owner}{/repo}",
           "subscriptions_url": "<origin>/users/<org>/subscriptions",
           "type": "Organization",
-          "url": "<origin>/users/<org>"
+          "url": "<origin>/users/<org>",
+          "user_view_type": "public"
         },
         "owner": {
           "avatar_url": "<avatar-url>",
@@ -108,13 +120,24 @@
           "starred_url": "<origin>/users/<org>/starred{/owner}{/repo}",
           "subscriptions_url": "<origin>/users/<org>/subscriptions",
           "type": "Organization",
-          "url": "<origin>/users/<org>"
+          "url": "<origin>/users/<org>",
+          "user_view_type": "public"
+        },
+        "permissions": {
+          "admin": false,
+          "maintain": false,
+          "pull": false,
+          "push": false,
+          "triage": false
         },
         "private": true,
+        "pull_request_creation_policy": "all",
         "pulls_url": "<origin>/repos/<org>/<repo>/pulls{/number}",
         "pushed_at": "<timestamp>",
         "releases_url": "<origin>/repos/<org>/<repo>/releases{/id}",
         "size": "<varies>",
+        "squash_merge_commit_message": "COMMIT_MESSAGES",
+        "squash_merge_commit_title": "COMMIT_OR_PR_TITLE",
         "ssh_url": "<ssh-origin>:<org>/<repo>.git",
         "stargazers_count": "<varies>",
         "stargazers_url": "<origin>/repos/<org>/<repo>/stargazers",
@@ -129,6 +152,7 @@
         "trees_url": "<origin>/repos/<org>/<repo>/git/trees{/sha}",
         "updated_at": "<timestamp>",
         "url": "<origin>/repos/<org>/<repo>",
+        "use_squash_pr_title_as_default": false,
         "visibility": "private",
         "watchers": "<varies>",
         "watchers_count": "<varies>",
@@ -139,10 +163,6 @@
       "step": "suspend",
       "request": "PUT /app/installations/<installation-id>/suspended",
       "status": 204,
-      "headers": {
-        "x-ratelimit-remaining": "<n>",
-        "x-ratelimit-resource": "core"
-      },
       "body": null
     },
     {
@@ -150,9 +170,7 @@
       "request": "GET /app/installations/<installation-id>",
       "status": 200,
       "headers": {
-        "content-type": "application/json; charset=utf-8",
-        "x-ratelimit-remaining": "<n>",
-        "x-ratelimit-resource": "core"
+        "content-type": "application/json; charset=utf-8"
       },
       "body": {
         "access_tokens_url": "<origin>/app/installations/<installation-id>/access_tokens",
@@ -174,7 +192,8 @@
           "starred_url": "<origin>/users/<org>/starred{/owner}{/repo}",
           "subscriptions_url": "<origin>/users/<org>/subscriptions",
           "type": "Organization",
-          "url": "<origin>/users/<org>"
+          "url": "<origin>/users/<org>",
+          "user_view_type": "public"
         },
         "app_id": "<app-id>",
         "app_slug": "<app>",
@@ -182,11 +201,11 @@
         "created_at": "<timestamp>",
         "events": [
           "member",
-          "organization",
-          "membership"
+          "membership",
+          "organization"
         ],
         "has_multiple_single_files": false,
-        "html_url": "<origin>/settings/installations/<installation-id>",
+        "html_url": "<origin>/organizations/<org>/settings/installations/<installation-id>",
         "id": "<installation-id>",
         "permissions": {
           "administration": "write",
@@ -198,7 +217,27 @@
         "single_file_name": null,
         "single_file_paths": [],
         "suspended_at": "<timestamp>",
-        "suspended_by": null,
+        "suspended_by": {
+          "avatar_url": "<avatar-url>",
+          "events_url": "<origin>/users/<app>%5Bbot%5D/events{/privacy}",
+          "followers_url": "<origin>/users/<app>%5Bbot%5D/followers",
+          "following_url": "<origin>/users/<app>%5Bbot%5D/following{/other_user}",
+          "gists_url": "<origin>/users/<app>%5Bbot%5D/gists{/gist_id}",
+          "gravatar_id": "",
+          "html_url": "<origin>/apps/<app>",
+          "id": "<app-bot-id>",
+          "login": "<app>[bot]",
+          "node_id": "<node-id>",
+          "organizations_url": "<origin>/users/<app>%5Bbot%5D/orgs",
+          "received_events_url": "<origin>/users/<app>%5Bbot%5D/received_events",
+          "repos_url": "<origin>/users/<app>%5Bbot%5D/repos",
+          "site_admin": false,
+          "starred_url": "<origin>/users/<app>%5Bbot%5D/starred{/owner}{/repo}",
+          "subscriptions_url": "<origin>/users/<app>%5Bbot%5D/subscriptions",
+          "type": "Bot",
+          "url": "<origin>/users/<app>%5Bbot%5D",
+          "user_view_type": "public"
+        },
         "target_id": "<org-id>",
         "target_type": "Organization",
         "updated_at": "<timestamp>"
@@ -209,13 +248,12 @@
       "request": "GET /repos/<org>/<repo>",
       "status": 403,
       "headers": {
-        "content-type": "application/json; charset=utf-8",
-        "x-ratelimit-remaining": "<n>",
-        "x-ratelimit-resource": "core"
+        "content-type": "application/json; charset=utf-8"
       },
       "body": {
         "documentation_url": "https://docs.github.com/rest",
-        "message": "This installation has been suspended"
+        "message": "This GitHub App installation is currently suspended.",
+        "status": "403"
       }
     },
     {
@@ -223,33 +261,24 @@
       "request": "POST /app/installations/<installation-id>/access_tokens",
       "status": 403,
       "headers": {
-        "content-type": "application/json; charset=utf-8",
-        "x-ratelimit-remaining": "<n>",
-        "x-ratelimit-resource": "core"
+        "content-type": "application/json; charset=utf-8"
       },
       "body": {
-        "documentation_url": "https://docs.github.com/rest/apps/apps#create-an-installation-access-token-for-an-app",
-        "message": "This installation has been suspended"
+        "documentation_url": "https://docs.github.com/rest/reference/apps#create-an-installation-access-token-for-an-app",
+        "message": "This installation has been suspended",
+        "status": "403"
       }
     },
     {
       "step": "suspend-again",
       "request": "PUT /app/installations/<installation-id>/suspended",
       "status": 204,
-      "headers": {
-        "x-ratelimit-remaining": "<n>",
-        "x-ratelimit-resource": "core"
-      },
       "body": null
     },
     {
       "step": "unsuspend",
       "request": "DELETE /app/installations/<installation-id>/suspended",
       "status": 204,
-      "headers": {
-        "x-ratelimit-remaining": "<n>",
-        "x-ratelimit-resource": "core"
-      },
       "body": null
     },
     {
@@ -257,9 +286,7 @@
       "request": "GET /app/installations/<installation-id>",
       "status": 200,
       "headers": {
-        "content-type": "application/json; charset=utf-8",
-        "x-ratelimit-remaining": "<n>",
-        "x-ratelimit-resource": "core"
+        "content-type": "application/json; charset=utf-8"
       },
       "body": {
         "access_tokens_url": "<origin>/app/installations/<installation-id>/access_tokens",
@@ -281,7 +308,8 @@
           "starred_url": "<origin>/users/<org>/starred{/owner}{/repo}",
           "subscriptions_url": "<origin>/users/<org>/subscriptions",
           "type": "Organization",
-          "url": "<origin>/users/<org>"
+          "url": "<origin>/users/<org>",
+          "user_view_type": "public"
         },
         "app_id": "<app-id>",
         "app_slug": "<app>",
@@ -289,11 +317,11 @@
         "created_at": "<timestamp>",
         "events": [
           "member",
-          "organization",
-          "membership"
+          "membership",
+          "organization"
         ],
         "has_multiple_single_files": false,
-        "html_url": "<origin>/settings/installations/<installation-id>",
+        "html_url": "<origin>/organizations/<org>/settings/installations/<installation-id>",
         "id": "<installation-id>",
         "permissions": {
           "administration": "write",
@@ -317,11 +345,17 @@
       "status": 200,
       "headers": {
         "content-type": "application/json; charset=utf-8",
+        "x-accepted-github-permissions": "metadata=read",
         "x-ratelimit-remaining": "<n>",
         "x-ratelimit-resource": "core"
       },
       "body": {
-        "allow_forking": true,
+        "allow_auto_merge": false,
+        "allow_forking": false,
+        "allow_merge_commit": true,
+        "allow_rebase_merge": true,
+        "allow_squash_merge": true,
+        "allow_update_branch": false,
         "archive_url": "<origin>/repos/<org>/<repo>/{archive_format}{/ref}",
         "archived": false,
         "assignees_url": "<origin>/repos/<org>/<repo>/assignees{/user}",
@@ -335,7 +369,9 @@
         "contents_url": "<origin>/repos/<org>/<repo>/contents/{+path}",
         "contributors_url": "<origin>/repos/<org>/<repo>/contributors",
         "created_at": "<timestamp>",
+        "custom_properties": {},
         "default_branch": "main",
+        "delete_branch_on_merge": false,
         "deployments_url": "<origin>/repos/<org>/<repo>/deployments",
         "description": "<varies>",
         "disabled": false,
@@ -351,11 +387,12 @@
         "git_tags_url": "<origin>/repos/<org>/<repo>/git/tags{/sha}",
         "git_url": "<git-origin>/<org>/<repo>.git",
         "has_discussions": false,
-        "has_downloads": true,
+        "has_downloads": false,
         "has_issues": true,
         "has_pages": false,
         "has_projects": true,
-        "has_wiki": true,
+        "has_pull_requests": true,
+        "has_wiki": false,
         "homepage": "<varies>",
         "hooks_url": "<origin>/repos/<org>/<repo>/hooks",
         "html_url": "<origin>/<org>/<repo>",
@@ -369,6 +406,8 @@
         "language": "<varies>",
         "languages_url": "<origin>/repos/<org>/<repo>/languages",
         "license": null,
+        "merge_commit_message": "PR_TITLE",
+        "merge_commit_title": "MERGE_MESSAGE",
         "merges_url": "<origin>/repos/<org>/<repo>/merges",
         "milestones_url": "<origin>/repos/<org>/<repo>/milestones{/number}",
         "mirror_url": null,
@@ -396,7 +435,8 @@
           "starred_url": "<origin>/users/<org>/starred{/owner}{/repo}",
           "subscriptions_url": "<origin>/users/<org>/subscriptions",
           "type": "Organization",
-          "url": "<origin>/users/<org>"
+          "url": "<origin>/users/<org>",
+          "user_view_type": "public"
         },
         "owner": {
           "avatar_url": "<avatar-url>",
@@ -416,13 +456,24 @@
           "starred_url": "<origin>/users/<org>/starred{/owner}{/repo}",
           "subscriptions_url": "<origin>/users/<org>/subscriptions",
           "type": "Organization",
-          "url": "<origin>/users/<org>"
+          "url": "<origin>/users/<org>",
+          "user_view_type": "public"
+        },
+        "permissions": {
+          "admin": false,
+          "maintain": false,
+          "pull": false,
+          "push": false,
+          "triage": false
         },
         "private": true,
+        "pull_request_creation_policy": "all",
         "pulls_url": "<origin>/repos/<org>/<repo>/pulls{/number}",
         "pushed_at": "<timestamp>",
         "releases_url": "<origin>/repos/<org>/<repo>/releases{/id}",
         "size": "<varies>",
+        "squash_merge_commit_message": "COMMIT_MESSAGES",
+        "squash_merge_commit_title": "COMMIT_OR_PR_TITLE",
         "ssh_url": "<ssh-origin>:<org>/<repo>.git",
         "stargazers_count": "<varies>",
         "stargazers_url": "<origin>/repos/<org>/<repo>/stargazers",
@@ -437,6 +488,7 @@
         "trees_url": "<origin>/repos/<org>/<repo>/git/trees{/sha}",
         "updated_at": "<timestamp>",
         "url": "<origin>/repos/<org>/<repo>",
+        "use_squash_pr_title_as_default": false,
         "visibility": "private",
         "watchers": "<varies>",
         "watchers_count": "<varies>",

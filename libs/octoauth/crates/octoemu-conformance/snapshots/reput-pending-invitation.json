@@ -1,7 +1,7 @@
 {
   "scenario": "reput-pending-invitation",
-  "source": "emulator (unverified)",
-  "note": "Generated from octoemu, not GitHub: unverified. The first live run (record mode) overwrites this file; any diff it shows is the fidelity signal.",
+  "source": "live",
+  "recorded": "2026-11-24",
   "steps": [
     {
       "step": "invite",
@@ -9,12 +9,13 @@
       "status": 201,
       "headers": {
         "content-type": "application/json; charset=utf-8",
+        "location": "<origin>/user/repository_invitations/<n>",
+        "x-accepted-github-permissions": "administration=write",
         "x-ratelimit-remaining": "<n>",
         "x-ratelimit-resource": "core"
       },
       "body": {
         "created_at": "<timestamp>",
-        "expired": false,
         "html_url": "<origin>/<org>/<repo>/invitations",
         "id": "<id>",
         "invitee": {
@@ -35,33 +36,34 @@
           "starred_url": "<origin>/users/<invitee>/starred{/owner}{/repo}",
           "subscriptions_url": "<origin>/users/<invitee>/subscriptions",
           "type": "User",
-          "url": "<origin>/users/<invitee>"
+          "url": "<origin>/users/<invitee>",
+          "user_view_type": "public"
         },
         "inviter": {
           "avatar_url": "<avatar-url>",
-          "events_url": "<origin>/users/<app>[bot]/events{/privacy}",
-          "followers_url": "<origin>/users/<app>[bot]/followers",
-          "following_url": "<origin>/users/<app>[bot]/following{/other_user}",
-          "gists_url": "<origin>/users/<app>[bot]/gists{/gist_id}",
+          "events_url": "<origin>/users/<app>%5Bbot%5D/events{/privacy}",
+          "followers_url": "<origin>/users/<app>%5Bbot%5D/followers",
+          "following_url": "<origin>/users/<app>%5Bbot%5D/following{/other_user}",
+          "gists_url": "<origin>/users/<app>%5Bbot%5D/gists{/gist_id}",
           "gravatar_id": "",
           "html_url": "<origin>/apps/<app>",
-          "id": "<id>",
+          "id": "<app-bot-id>",
           "login": "<app>[bot]",
           "node_id": "<node-id>",
-          "organizations_url": "<origin>/users/<app>[bot]/orgs",
-          "received_events_url": "<origin>/users/<app>[bot]/received_events",
-          "repos_url": "<origin>/users/<app>[bot]/repos",
+          "organizations_url": "<origin>/users/<app>%5Bbot%5D/orgs",
+          "received_events_url": "<origin>/users/<app>%5Bbot%5D/received_events",
+          "repos_url": "<origin>/users/<app>%5Bbot%5D/repos",
           "site_admin": false,
-          "starred_url": "<origin>/users/<app>[bot]/starred{/owner}{/repo}",
-          "subscriptions_url": "<origin>/users/<app>[bot]/subscriptions",
+          "starred_url": "<origin>/users/<app>%5Bbot%5D/starred{/owner}{/repo}",
+          "subscriptions_url": "<origin>/users/<app>%5Bbot%5D/subscriptions",
           "type": "Bot",
-          "url": "<origin>/users/<app>[bot]"
+          "url": "<origin>/users/<app>%5Bbot%5D",
+          "user_view_type": "public"
         },
         "node_id": "<node-id>",
         "permissions": "read",
         "repository": {
           "archive_url": "<origin>/repos/<org>/<repo>/{archive_format}{/ref}",
-          "archived": false,
           "assignees_url": "<origin>/repos/<org>/<repo>/assignees{/user}",
           "blobs_url": "<origin>/repos/<org>/<repo>/git/blobs{/sha}",
           "branches_url": "<origin>/repos/<org>/<repo>/branches{/branch}",
@@ -71,10 +73,8 @@
           "compare_url": "<origin>/repos/<org>/<repo>/compare/{base}...{head}",
           "contents_url": "<origin>/repos/<org>/<repo>/contents/{+path}",
           "contributors_url": "<origin>/repos/<org>/<repo>/contributors",
-          "created_at": "<timestamp>",
           "deployments_url": "<origin>/repos/<org>/<repo>/deployments",
           "description": "<varies>",
-          "disabled": false,
           "downloads_url": "<origin>/repos/<org>/<repo>/downloads",
           "events_url": "<origin>/repos/<org>/<repo>/events",
           "fork": false,
@@ -115,7 +115,8 @@
             "starred_url": "<origin>/users/<org>/starred{/owner}{/repo}",
             "subscriptions_url": "<origin>/users/<org>/subscriptions",
             "type": "Organization",
-            "url": "<origin>/users/<org>"
+            "url": "<origin>/users/<org>",
+            "user_view_type": "public"
           },
           "private": true,
           "pulls_url": "<origin>/repos/<org>/<repo>/pulls{/number}",
@@ -127,9 +128,7 @@
           "tags_url": "<origin>/repos/<org>/<repo>/tags",
           "teams_url": "<origin>/repos/<org>/<repo>/teams",
           "trees_url": "<origin>/repos/<org>/<repo>/git/trees{/sha}",
-          "updated_at": "<timestamp>",
-          "url": "<origin>/repos/<org>/<repo>",
-          "visibility": "private"
+          "url": "<origin>/repos/<org>/<repo>"
         },
         "url": "<origin>/user/repository_invitations/<n>"
       }
@@ -140,12 +139,13 @@
       "status": 201,
       "headers": {
         "content-type": "application/json; charset=utf-8",
+        "location": "<origin>/user/repository_invitations/<n>",
+        "x-accepted-github-permissions": "administration=write",
         "x-ratelimit-remaining": "<n>",
         "x-ratelimit-resource": "core"
       },
       "body": {
         "created_at": "<timestamp>",
-        "expired": false,
         "html_url": "<origin>/<org>/<repo>/invitations",
         "id": "<id>",
         "invitee": {
@@ -166,33 +166,34 @@
           "starred_url": "<origin>/users/<invitee>/starred{/owner}{/repo}",
           "subscriptions_url": "<origin>/users/<invitee>/subscriptions",
           "type": "User",
-          "url": "<origin>/users/<invitee>"
+          "url": "<origin>/users/<invitee>",
+          "user_view_type": "public"
         },
         "inviter": {
           "avatar_url": "<avatar-url>",
-          "events_url": "<origin>/users/<app>[bot]/events{/privacy}",
-          "followers_url": "<origin>/users/<app>[bot]/followers",
-          "following_url": "<origin>/users/<app>[bot]/following{/other_user}",
-          "gists_url": "<origin>/users/<app>[bot]/gists{/gist_id}",
+          "events_url": "<origin>/users/<app>%5Bbot%5D/events{/privacy}",
+          "followers_url": "<origin>/users/<app>%5Bbot%5D/followers",
+          "following_url": "<origin>/users/<app>%5Bbot%5D/following{/other_user}",
+          "gists_url": "<origin>/users/<app>%5Bbot%5D/gists{/gist_id}",
           "gravatar_id": "",
           "html_url": "<origin>/apps/<app>",
-          "id": "<id>",
+          "id": "<app-bot-id>",
           "login": "<app>[bot]",
           "node_id": "<node-id>",
-          "organizations_url": "<origin>/users/<app>[bot]/orgs",
-          "received_events_url": "<origin>/users/<app>[bot]/received_events",
-          "repos_url": "<origin>/users/<app>[bot]/repos",
+          "organizations_url": "<origin>/users/<app>%5Bbot%5D/orgs",
+          "received_events_url": "<origin>/users/<app>%5Bbot%5D/received_events",
+          "repos_url": "<origin>/users/<app>%5Bbot%5D/repos",
           "site_admin": false,
-          "starred_url": "<origin>/users/<app>[bot]/starred{/owner}{/repo}",
-          "subscriptions_url": "<origin>/users/<app>[bot]/subscriptions",
+          "starred_url": "<origin>/users/<app>%5Bbot%5D/starred{/owner}{/repo}",
+          "subscriptions_url": "<origin>/users/<app>%5Bbot%5D/subscriptions",
           "type": "Bot",
-          "url": "<origin>/users/<app>[bot]"
+          "url": "<origin>/users/<app>%5Bbot%5D",
+          "user_view_type": "public"
         },
         "node_id": "<node-id>",
         "permissions": "read",
         "repository": {
           "archive_url": "<origin>/repos/<org>/<repo>/{archive_format}{/ref}",
-          "archived": false,
           "assignees_url": "<origin>/repos/<org>/<repo>/assignees{/user}",
           "blobs_url": "<origin>/repos/<org>/<repo>/git/blobs{/sha}",
           "branches_url": "<origin>/repos/<org>/<repo>/branches{/branch}",
@@ -202,10 +203,8 @@
           "compare_url": "<origin>/repos/<org>/<repo>/compare/{base}...{head}",
           "contents_url": "<origin>/repos/<org>/<repo>/contents/{+path}",
           "contributors_url": "<origin>/repos/<org>/<repo>/contributors",
-          "created_at": "<timestamp>",
           "deployments_url": "<origin>/repos/<org>/<repo>/deployments",
           "description": "<varies>",
-          "disabled": false,
           "downloads_url": "<origin>/repos/<org>/<repo>/downloads",
           "events_url": "<origin>/repos/<org>/<repo>/events",
           "fork": false,
@@ -246,7 +245,8 @@
             "starred_url": "<origin>/users/<org>/starred{/owner}{/repo}",
             "subscriptions_url": "<origin>/users/<org>/subscriptions",
             "type": "Organization",
-            "url": "<origin>/users/<org>"
+            "url": "<origin>/users/<org>",
+            "user_view_type": "public"
           },
           "private": true,
           "pulls_url": "<origin>/repos/<org>/<repo>/pulls{/number}",
@@ -258,9 +258,7 @@
           "tags_url": "<origin>/repos/<org>/<repo>/tags",
           "teams_url": "<origin>/repos/<org>/<repo>/teams",
           "trees_url": "<origin>/repos/<org>/<repo>/git/trees{/sha}",
-          "updated_at": "<timestamp>",
-          "url": "<origin>/repos/<org>/<repo>",
-          "visibility": "private"
+          "url": "<origin>/repos/<org>/<repo>"
         },
         "url": "<origin>/user/repository_invitations/<n>"
       }
@@ -271,12 +269,13 @@
       "status": 201,
       "headers": {
         "content-type": "application/json; charset=utf-8",
+        "location": "<origin>/user/repository_invitations/<n>",
+        "x-accepted-github-permissions": "administration=write",
         "x-ratelimit-remaining": "<n>",
         "x-ratelimit-resource": "core"
       },
       "body": {
         "created_at": "<timestamp>",
-        "expired": false,
         "html_url": "<origin>/<org>/<repo>/invitations",
         "id": "<id>",
         "invitee": {
@@ -297,33 +296,34 @@
           "starred_url": "<origin>/users/<invitee>/starred{/owner}{/repo}",
           "subscriptions_url": "<origin>/users/<invitee>/subscriptions",
           "type": "User",
-          "url": "<origin>/users/<invitee>"
+          "url": "<origin>/users/<invitee>",
+          "user_view_type": "public"
         },
         "inviter": {
           "avatar_url": "<avatar-url>",
-          "events_url": "<origin>/users/<app>[bot]/events{/privacy}",
-          "followers_url": "<origin>/users/<app>[bot]/followers",
-          "following_url": "<origin>/users/<app>[bot]/following{/other_user}",
-          "gists_url": "<origin>/users/<app>[bot]/gists{/gist_id}",
+          "events_url": "<origin>/users/<app>%5Bbot%5D/events{/privacy}",
+          "followers_url": "<origin>/users/<app>%5Bbot%5D/followers",
+          "following_url": "<origin>/users/<app>%5Bbot%5D/following{/other_user}",
+          "gists_url": "<origin>/users/<app>%5Bbot%5D/gists{/gist_id}",
           "gravatar_id": "",
           "html_url": "<origin>/apps/<app>",
-          "id": "<id>",
+          "id": "<app-bot-id>",
           "login": "<app>[bot]",
           "node_id": "<node-id>",
-          "organizations_url": "<origin>/users/<app>[bot]/orgs",
-          "received_events_url": "<origin>/users/<app>[bot]/received_events",
-          "repos_url": "<origin>/users/<app>[bot]/repos",
+          "organizations_url": "<origin>/users/<app>%5Bbot%5D/orgs",
+          "received_events_url": "<origin>/users/<app>%5Bbot%5D/received_events",
+          "repos_url": "<origin>/users/<app>%5Bbot%5D/repos",
           "site_admin": false,
-          "starred_url": "<origin>/users/<app>[bot]/starred{/owner}{/repo}",
-          "subscriptions_url": "<origin>/users/<app>[bot]/subscriptions",
+          "starred_url": "<origin>/users/<app>%5Bbot%5D/starred{/owner}{/repo}",
+          "subscriptions_url": "<origin>/users/<app>%5Bbot%5D/subscriptions",
           "type": "Bot",
-          "url": "<origin>/users/<app>[bot]"
+          "url": "<origin>/users/<app>%5Bbot%5D",
+          "user_view_type": "public"
         },
         "node_id": "<node-id>",
-        "permissions": "write",
+        "permissions": "read",
         "repository": {
           "archive_url": "<origin>/repos/<org>/<repo>/{archive_format}{/ref}",
-          "archived": false,
           "assignees_url": "<origin>/repos/<org>/<repo>/assignees{/user}",
           "blobs_url": "<origin>/repos/<org>/<repo>/git/blobs{/sha}",
           "branches_url": "<origin>/repos/<org>/<repo>/branches{/branch}",
@@ -333,10 +333,8 @@
           "compare_url": "<origin>/repos/<org>/<repo>/compare/{base}...{head}",
           "contents_url": "<origin>/repos/<org>/<repo>/contents/{+path}",
           "contributors_url": "<origin>/repos/<org>/<repo>/contributors",
-          "created_at": "<timestamp>",
           "deployments_url": "<origin>/repos/<org>/<repo>/deployments",
           "description": "<varies>",
-          "disabled": false,
           "downloads_url": "<origin>/repos/<org>/<repo>/downloads",
           "events_url": "<origin>/repos/<org>/<repo>/events",
           "fork": false,
@@ -377,7 +375,8 @@
             "starred_url": "<origin>/users/<org>/starred{/owner}{/repo}",
             "subscriptions_url": "<origin>/users/<org>/subscriptions",
             "type": "Organization",
-            "url": "<origin>/users/<org>"
+            "url": "<origin>/users/<org>",
+            "user_view_type": "public"
           },
           "private": true,
           "pulls_url": "<origin>/repos/<org>/<repo>/pulls{/number}",
@@ -389,9 +388,7 @@
           "tags_url": "<origin>/repos/<org>/<repo>/tags",
           "teams_url": "<origin>/repos/<org>/<repo>/teams",
           "trees_url": "<origin>/repos/<org>/<repo>/git/trees{/sha}",
-          "updated_at": "<timestamp>",
-          "url": "<origin>/repos/<org>/<repo>",
-          "visibility": "private"
+          "url": "<origin>/repos/<org>/<repo>"
         },
         "url": "<origin>/user/repository_invitations/<n>"
       }
@@ -402,6 +399,7 @@
       "status": 200,
       "headers": {
         "content-type": "application/json; charset=utf-8",
+        "x-accepted-github-permissions": "administration=read; private_repository_invitations=read",
         "x-ratelimit-remaining": "<n>",
         "x-ratelimit-resource": "core"
       },
@@ -429,33 +427,34 @@
             "starred_url": "<origin>/users/<invitee>/starred{/owner}{/repo}",
             "subscriptions_url": "<origin>/users/<invitee>/subscriptions",
             "type": "User",
-            "url": "<origin>/users/<invitee>"
+            "url": "<origin>/users/<invitee>",
+            "user_view_type": "public"
           },
           "inviter": {
             "avatar_url": "<avatar-url>",
-            "events_url": "<origin>/users/<app>[bot]/events{/privacy}",
-            "followers_url": "<origin>/users/<app>[bot]/followers",
-            "following_url": "<origin>/users/<app>[bot]/following{/other_user}",
-            "gists_url": "<origin>/users/<app>[bot]/gists{/gist_id}",
+            "events_url": "<origin>/users/<app>%5Bbot%5D/events{/privacy}",
+            "followers_url": "<origin>/users/<app>%5Bbot%5D/followers",
+            "following_url": "<origin>/users/<app>%5Bbot%5D/following{/other_user}",
+            "gists_url": "<origin>/users/<app>%5Bbot%5D/gists{/gist_id}",
             "gravatar_id": "",
             "html_url": "<origin>/apps/<app>",
-            "id": "<id>",
+            "id": "<app-bot-id>",
             "login": "<app>[bot]",
             "node_id": "<node-id>",
-            "organizations_url": "<origin>/users/<app>[bot]/orgs",
-            "received_events_url": "<origin>/users/<app>[bot]/received_events",
-            "repos_url": "<origin>/users/<app>[bot]/repos",
+            "organizations_url": "<origin>/users/<app>%5Bbot%5D/orgs",
+            "received_events_url": "<origin>/users/<app>%5Bbot%5D/received_events",
+            "repos_url": "<origin>/users/<app>%5Bbot%5D/repos",
             "site_admin": false,
-            "starred_url": "<origin>/users/<app>[bot]/starred{/owner}{/repo}",
-            "subscriptions_url": "<origin>/users/<app>[bot]/subscriptions",
+            "starred_url": "<origin>/users/<app>%5Bbot%5D/starred{/owner}{/repo}",
+            "subscriptions_url": "<origin>/users/<app>%5Bbot%5D/subscriptions",
             "type": "Bot",
-            "url": "<origin>/users/<app>[bot]"
+            "url": "<origin>/users/<app>%5Bbot%5D",
+            "user_view_type": "public"
           },
           "node_id": "<node-id>",
-          "permissions": "write",
+          "permissions": "read",
           "repository": {
             "archive_url": "<origin>/repos/<org>/<repo>/{archive_format}{/ref}",
-            "archived": false,
             "assignees_url": "<origin>/repos/<org>/<repo>/assignees{/user}",
             "blobs_url": "<origin>/repos/<org>/<repo>/git/blobs{/sha}",
             "branches_url": "<origin>/repos/<org>/<repo>/branches{/branch}",
@@ -465,10 +464,8 @@
             "compare_url": "<origin>/repos/<org>/<repo>/compare/{base}...{head}",
             "contents_url": "<origin>/repos/<org>/<repo>/contents/{+path}",
             "contributors_url": "<origin>/repos/<org>/<repo>/contributors",
-            "created_at": "<timestamp>",
             "deployments_url": "<origin>/repos/<org>/<repo>/deployments",
             "description": "<varies>",
-            "disabled": false,
             "downloads_url": "<origin>/repos/<org>/<repo>/downloads",
             "events_url": "<origin>/repos/<org>/<repo>/events",
             "fork": false,
@@ -509,7 +506,8 @@
               "starred_url": "<origin>/users/<org>/starred{/owner}{/repo}",
               "subscriptions_url": "<origin>/users/<org>/subscriptions",
               "type": "Organization",
-              "url": "<origin>/users/<org>"
+              "url": "<origin>/users/<org>",
+              "user_view_type": "public"
             },
             "private": true,
             "pulls_url": "<origin>/repos/<org>/<repo>/pulls{/number}",
@@ -521,9 +519,7 @@
             "tags_url": "<origin>/repos/<org>/<repo>/tags",
             "teams_url": "<origin>/repos/<org>/<repo>/teams",
             "trees_url": "<origin>/repos/<org>/<repo>/git/trees{/sha}",
-            "updated_at": "<timestamp>",
-            "url": "<origin>/repos/<org>/<repo>",
-            "visibility": "private"
+            "url": "<origin>/repos/<org>/<repo>"
           },
           "url": "<origin>/user/repository_invitations/<n>"
         }
@@ -562,33 +558,34 @@
             "starred_url": "<origin>/users/<invitee>/starred{/owner}{/repo}",
             "subscriptions_url": "<origin>/users/<invitee>/subscriptions",
             "type": "User",
-            "url": "<origin>/users/<invitee>"
+            "url": "<origin>/users/<invitee>",
+            "user_view_type": "public"
           },
           "inviter": {
             "avatar_url": "<avatar-url>",
-            "events_url": "<origin>/users/<app>[bot]/events{/privacy}",
-            "followers_url": "<origin>/users/<app>[bot]/followers",
-            "following_url": "<origin>/users/<app>[bot]/following{/other_user}",
-            "gists_url": "<origin>/users/<app>[bot]/gists{/gist_id}",
+            "events_url": "<origin>/users/<app>%5Bbot%5D/events{/privacy}",
+            "followers_url": "<origin>/users/<app>%5Bbot%5D/followers",
+            "following_url": "<origin>/users/<app>%5Bbot%5D/following{/other_user}",
+            "gists_url": "<origin>/users/<app>%5Bbot%5D/gists{/gist_id}",
             "gravatar_id": "",
             "html_url": "<origin>/apps/<app>",
-            "id": "<id>",
+            "id": "<app-bot-id>",
             "login": "<app>[bot]",
             "node_id": "<node-id>",
-            "organizations_url": "<origin>/users/<app>[bot]/orgs",
-            "received_events_url": "<origin>/users/<app>[bot]/received_events",
-            "repos_url": "<origin>/users/<app>[bot]/repos",
+            "organizations_url": "<origin>/users/<app>%5Bbot%5D/orgs",
+            "received_events_url": "<origin>/users/<app>%5Bbot%5D/received_events",
+            "repos_url": "<origin>/users/<app>%5Bbot%5D/repos",
             "site_admin": false,
-            "starred_url": "<origin>/users/<app>[bot]/starred{/owner}{/repo}",
-            "subscriptions_url": "<origin>/users/<app>[bot]/subscriptions",
+            "starred_url": "<origin>/users/<app>%5Bbot%5D/starred{/owner}{/repo}",
+            "subscriptions_url": "<origin>/users/<app>%5Bbot%5D/subscriptions",
             "type": "Bot",
-            "url": "<origin>/users/<app>[bot]"
+            "url": "<origin>/users/<app>%5Bbot%5D",
+            "user_view_type": "public"
           },
           "node_id": "<node-id>",
-          "permissions": "write",
+          "permissions": "read",
           "repository": {
             "archive_url": "<origin>/repos/<org>/<repo>/{archive_format}{/ref}",
-            "archived": false,
             "assignees_url": "<origin>/repos/<org>/<repo>/assignees{/user}",
             "blobs_url": "<origin>/repos/<org>/<repo>/git/blobs{/sha}",
             "branches_url": "<origin>/repos/<org>/<repo>/branches{/branch}",
@@ -598,10 +595,8 @@
             "compare_url": "<origin>/repos/<org>/<repo>/compare/{base}...{head}",
             "contents_url": "<origin>/repos/<org>/<repo>/contents/{+path}",
             "contributors_url": "<origin>/repos/<org>/<repo>/contributors",
-            "created_at": "<timestamp>",
             "deployments_url": "<origin>/repos/<org>/<repo>/deployments",
             "description": "<varies>",
-            "disabled": false,
             "downloads_url": "<origin>/repos/<org>/<repo>/downloads",
             "events_url": "<origin>/repos/<org>/<repo>/events",
             "fork": false,
@@ -642,7 +637,8 @@
               "starred_url": "<origin>/users/<org>/starred{/owner}{/repo}",
               "subscriptions_url": "<origin>/users/<org>/subscriptions",
               "type": "Organization",
-              "url": "<origin>/users/<org>"
+              "url": "<origin>/users/<org>",
+              "user_view_type": "public"
             },
             "private": true,
             "pulls_url": "<origin>/repos/<org>/<repo>/pulls{/number}",
@@ -654,9 +650,7 @@
             "tags_url": "<origin>/repos/<org>/<repo>/tags",
             "teams_url": "<origin>/repos/<org>/<repo>/teams",
             "trees_url": "<origin>/repos/<org>/<repo>/git/trees{/sha}",
-            "updated_at": "<timestamp>",
-            "url": "<origin>/repos/<org>/<repo>",
-            "visibility": "private"
+            "url": "<origin>/repos/<org>/<repo>"
           },
           "url": "<origin>/user/repository_invitations/<n>"
         }
@@ -667,6 +661,7 @@
       "request": "DELETE /repos/<org>/<repo>/invitations/<n>",
       "status": 204,
       "headers": {
+        "x-accepted-github-permissions": "administration=write",
         "x-ratelimit-remaining": "<n>",
         "x-ratelimit-resource": "core"
       },
@@ -678,6 +673,7 @@
       "status": 200,
       "headers": {
         "content-type": "application/json; charset=utf-8",
+        "x-accepted-github-permissions": "administration=read; private_repository_invitations=read",
         "x-ratelimit-remaining": "<n>",
         "x-ratelimit-resource": "core"
       },

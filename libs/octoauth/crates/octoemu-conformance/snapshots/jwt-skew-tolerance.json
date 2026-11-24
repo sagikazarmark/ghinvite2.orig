@@ -1,16 +1,14 @@
 {
   "scenario": "jwt-skew-tolerance",
-  "source": "emulator (unverified)",
-  "note": "Generated from octoemu, not GitHub: unverified. The first live run (record mode) overwrites this file; any diff it shows is the fidelity signal.",
+  "source": "live",
+  "recorded": "2026-11-24",
   "steps": [
     {
       "step": "iat-ahead-0s",
       "request": "GET /app",
       "status": 200,
       "headers": {
-        "content-type": "application/json; charset=utf-8",
-        "x-ratelimit-remaining": "<n>",
-        "x-ratelimit-resource": "core"
+        "content-type": "application/json; charset=utf-8"
       },
       "body": {
         "client_id": "<app-client-id>",
@@ -18,13 +16,13 @@
         "description": "<varies>",
         "events": [
           "member",
-          "organization",
-          "membership"
+          "membership",
+          "organization"
         ],
-        "external_url": "<origin>/apps/<app>",
+        "external_url": "<origin>/<org>",
         "html_url": "<origin>/apps/<app>",
         "id": "<app-id>",
-        "installations_count": 3,
+        "installations_count": 1,
         "name": "<varies>",
         "node_id": "<node-id>",
         "owner": {
@@ -45,7 +43,8 @@
           "starred_url": "<origin>/users/<org>/starred{/owner}{/repo}",
           "subscriptions_url": "<origin>/users/<org>/subscriptions",
           "type": "Organization",
-          "url": "<origin>/users/<org>"
+          "url": "<origin>/users/<org>",
+          "user_view_type": "public"
         },
         "permissions": {
           "administration": "write",
@@ -61,9 +60,7 @@
       "request": "GET /app",
       "status": 200,
       "headers": {
-        "content-type": "application/json; charset=utf-8",
-        "x-ratelimit-remaining": "<n>",
-        "x-ratelimit-resource": "core"
+        "content-type": "application/json; charset=utf-8"
       },
       "body": {
         "client_id": "<app-client-id>",
@@ -71,13 +68,13 @@
         "description": "<varies>",
         "events": [
           "member",
-          "organization",
-          "membership"
+          "membership",
+          "organization"
         ],
-        "external_url": "<origin>/apps/<app>",
+        "external_url": "<origin>/<org>",
         "html_url": "<origin>/apps/<app>",
         "id": "<app-id>",
-        "installations_count": 3,
+        "installations_count": 1,
         "name": "<varies>",
         "node_id": "<node-id>",
         "owner": {
@@ -98,7 +95,8 @@
           "starred_url": "<origin>/users/<org>/starred{/owner}{/repo}",
           "subscriptions_url": "<origin>/users/<org>/subscriptions",
           "type": "Organization",
-          "url": "<origin>/users/<org>"
+          "url": "<origin>/users/<org>",
+          "user_view_type": "public"
         },
         "permissions": {
           "administration": "write",
@@ -114,9 +112,7 @@
       "request": "GET /app",
       "status": 200,
       "headers": {
-        "content-type": "application/json; charset=utf-8",
-        "x-ratelimit-remaining": "<n>",
-        "x-ratelimit-resource": "core"
+        "content-type": "application/json; charset=utf-8"
       },
       "body": {
         "client_id": "<app-client-id>",
@@ -124,13 +120,13 @@
         "description": "<varies>",
         "events": [
           "member",
-          "organization",
-          "membership"
+          "membership",
+          "organization"
         ],
-        "external_url": "<origin>/apps/<app>",
+        "external_url": "<origin>/<org>",
         "html_url": "<origin>/apps/<app>",
         "id": "<app-id>",
-        "installations_count": 3,
+        "installations_count": 1,
         "name": "<varies>",
         "node_id": "<node-id>",
         "owner": {
@@ -151,7 +147,8 @@
           "starred_url": "<origin>/users/<org>/starred{/owner}{/repo}",
           "subscriptions_url": "<origin>/users/<org>/subscriptions",
           "type": "Organization",
-          "url": "<origin>/users/<org>"
+          "url": "<origin>/users/<org>",
+          "user_view_type": "public"
         },
         "permissions": {
           "administration": "write",
@@ -165,53 +162,9 @@
     {
       "step": "iat-ahead-45s",
       "request": "GET /app",
-      "status": 401,
-      "headers": {
-        "content-type": "application/json; charset=utf-8",
-        "x-ratelimit-remaining": "<n>",
-        "x-ratelimit-resource": "core"
-      },
-      "body": {
-        "documentation_url": "https://docs.github.com/rest",
-        "message": "'Issued at' claim ('iat') must be an Integer representing the time that the assertion was issued"
-      }
-    },
-    {
-      "step": "iat-ahead-60s",
-      "request": "GET /app",
-      "status": 401,
-      "headers": {
-        "content-type": "application/json; charset=utf-8",
-        "x-ratelimit-remaining": "<n>",
-        "x-ratelimit-resource": "core"
-      },
-      "body": {
-        "documentation_url": "https://docs.github.com/rest",
-        "message": "'Issued at' claim ('iat') must be an Integer representing the time that the assertion was issued"
-      }
-    },
-    {
-      "step": "iat-ahead-300s",
-      "request": "GET /app",
-      "status": 401,
-      "headers": {
-        "content-type": "application/json; charset=utf-8",
-        "x-ratelimit-remaining": "<n>",
-        "x-ratelimit-resource": "core"
-      },
-      "body": {
-        "documentation_url": "https://docs.github.com/rest",
-        "message": "'Issued at' claim ('iat') must be an Integer representing the time that the assertion was issued"
-      }
-    },
-    {
-      "step": "exp-ahead-600s",
-      "request": "GET /app",
       "status": 200,
       "headers": {
-        "content-type": "application/json; charset=utf-8",
-        "x-ratelimit-remaining": "<n>",
-        "x-ratelimit-resource": "core"
+        "content-type": "application/json; charset=utf-8"
       },
       "body": {
         "client_id": "<app-client-id>",
@@ -219,13 +172,13 @@
         "description": "<varies>",
         "events": [
           "member",
-          "organization",
-          "membership"
+          "membership",
+          "organization"
         ],
-        "external_url": "<origin>/apps/<app>",
+        "external_url": "<origin>/<org>",
         "html_url": "<origin>/apps/<app>",
         "id": "<app-id>",
-        "installations_count": 3,
+        "installations_count": 1,
         "name": "<varies>",
         "node_id": "<node-id>",
         "owner": {
@@ -246,7 +199,125 @@
           "starred_url": "<origin>/users/<org>/starred{/owner}{/repo}",
           "subscriptions_url": "<origin>/users/<org>/subscriptions",
           "type": "Organization",
-          "url": "<origin>/users/<org>"
+          "url": "<origin>/users/<org>",
+          "user_view_type": "public"
+        },
+        "permissions": {
+          "administration": "write",
+          "members": "write",
+          "metadata": "read"
+        },
+        "slug": "<app>",
+        "updated_at": "<timestamp>"
+      }
+    },
+    {
+      "step": "iat-ahead-60s",
+      "request": "GET /app",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "body": {
+        "client_id": "<app-client-id>",
+        "created_at": "<timestamp>",
+        "description": "<varies>",
+        "events": [
+          "member",
+          "membership",
+          "organization"
+        ],
+        "external_url": "<origin>/<org>",
+        "html_url": "<origin>/apps/<app>",
+        "id": "<app-id>",
+        "installations_count": 1,
+        "name": "<varies>",
+        "node_id": "<node-id>",
+        "owner": {
+          "avatar_url": "<avatar-url>",
+          "events_url": "<origin>/users/<org>/events{/privacy}",
+          "followers_url": "<origin>/users/<org>/followers",
+          "following_url": "<origin>/users/<org>/following{/other_user}",
+          "gists_url": "<origin>/users/<org>/gists{/gist_id}",
+          "gravatar_id": "",
+          "html_url": "<origin>/<org>",
+          "id": "<org-id>",
+          "login": "<org>",
+          "node_id": "<node-id>",
+          "organizations_url": "<origin>/users/<org>/orgs",
+          "received_events_url": "<origin>/users/<org>/received_events",
+          "repos_url": "<origin>/users/<org>/repos",
+          "site_admin": false,
+          "starred_url": "<origin>/users/<org>/starred{/owner}{/repo}",
+          "subscriptions_url": "<origin>/users/<org>/subscriptions",
+          "type": "Organization",
+          "url": "<origin>/users/<org>",
+          "user_view_type": "public"
+        },
+        "permissions": {
+          "administration": "write",
+          "members": "write",
+          "metadata": "read"
+        },
+        "slug": "<app>",
+        "updated_at": "<timestamp>"
+      }
+    },
+    {
+      "step": "iat-ahead-300s",
+      "request": "GET /app",
+      "status": 401,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "body": {
+        "documentation_url": "https://docs.github.com/rest",
+        "message": "Bad credentials",
+        "status": "401"
+      }
+    },
+    {
+      "step": "exp-ahead-600s",
+      "request": "GET /app",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "body": {
+        "client_id": "<app-client-id>",
+        "created_at": "<timestamp>",
+        "description": "<varies>",
+        "events": [
+          "member",
+          "membership",
+          "organization"
+        ],
+        "external_url": "<origin>/<org>",
+        "html_url": "<origin>/apps/<app>",
+        "id": "<app-id>",
+        "installations_count": 1,
+        "name": "<varies>",
+        "node_id": "<node-id>",
+        "owner": {
+          "avatar_url": "<avatar-url>",
+          "events_url": "<origin>/users/<org>/events{/privacy}",
+          "followers_url": "<origin>/users/<org>/followers",
+          "following_url": "<origin>/users/<org>/following{/other_user}",
+          "gists_url": "<origin>/users/<org>/gists{/gist_id}",
+          "gravatar_id": "",
+          "html_url": "<origin>/<org>",
+          "id": "<org-id>",
+          "login": "<org>",
+          "node_id": "<node-id>",
+          "organizations_url": "<origin>/users/<org>/orgs",
+          "received_events_url": "<origin>/users/<org>/received_events",
+          "repos_url": "<origin>/users/<org>/repos",
+          "site_admin": false,
+          "starred_url": "<origin>/users/<org>/starred{/owner}{/repo}",
+          "subscriptions_url": "<origin>/users/<org>/subscriptions",
+          "type": "Organization",
+          "url": "<origin>/users/<org>",
+          "user_view_type": "public"
         },
         "permissions": {
           "administration": "write",
@@ -262,13 +333,12 @@
       "request": "GET /app",
       "status": 401,
       "headers": {
-        "content-type": "application/json; charset=utf-8",
-        "x-ratelimit-remaining": "<n>",
-        "x-ratelimit-resource": "core"
+        "content-type": "application/json; charset=utf-8"
       },
       "body": {
         "documentation_url": "https://docs.github.com/rest",
-        "message": "'Expiration time' claim ('exp') is too far in the future"
+        "message": "'Expiration time' claim ('exp') is too far in the future",
+        "status": "401"
       }
     }
   ]
