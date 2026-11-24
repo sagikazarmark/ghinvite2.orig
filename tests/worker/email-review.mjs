@@ -13,7 +13,9 @@ const ring=(current,keys)=>`kekring1;name=p1-email;current=${current};hwm=${Math
  return `k${n}=${key.toString('base64url')}.${kid.toString('hex')}`;
 }).join(';')}`;
 let logs='',overflow=false,outbound=0;
-const worker=(name,keyring)=>({name,modules:true,scriptPath:fileURLToPath(new URL('./worker.mjs',import.meta.url)),modulesRules:[{type:'CompiledWasm',include:['**/*.wasm']}],compatibilityDate:'2024-09-23',compatibilityFlags:['nodejs_compat'],d1Databases:{DB:'email-review-shared'},bindings:{P1_EMAIL_KEYRING:keyring},outboundService(){outbound++;throw new Error('review proof has no network effects');}});
+// Hourly cleanup only: daily-digest.mjs covers the scheduled sweep watchdog,
+// which needs Restate ingress this proof does not model.
+const worker=(name,keyring)=>({name,modules:true,scriptPath:fileURLToPath(new URL('./worker.mjs',import.meta.url)),modulesRules:[{type:'CompiledWasm',include:['**/*.wasm']}],compatibilityDate:'2024-09-23',compatibilityFlags:['nodejs_compat'],d1Databases:{DB:'email-review-shared'},bindings:{P1_EMAIL_KEYRING:keyring,GH_SWEEP_WATCHDOG_ENABLED:'false'},outboundService(){outbound++;throw new Error('review proof has no network effects');}});
 const mf=new Miniflare({log:new Log(LogLevel.ERROR),workers:[worker('a',ring(1,[[1,7]])),worker('b',ring(1,[[1,7]])),worker('newer',ring(2,[[1,7],[2,8]])),worker('wrong',ring(1,[[1,9]]))],handleRuntimeStdio(stdout,stderr){for(const stream of [stdout,stderr])stream.on('data',chunk=>{if(Buffer.byteLength(logs)+chunk.length>2*1024*1024)overflow=true;else logs+=chunk.toString();});}});
 let number=0;
 const binding=()=>({email_ref:randomBytes(32).toString('hex'),batch:{batch_id:'01ARZ3NDEKTSV4RRFFQ69G5FAV',row:++number},account_id:42,installation_id:9});
