@@ -30,7 +30,9 @@ def verify(data):
     assert len(puts) == r['provider_puts'] == 2
     assert {c['path'] for c in puts} == {'/repos/acme/api/collaborators/user-91', '/repos/acme/api/collaborators/user-92'}
     assert all(c['status'] == 201 and c['permission'] == 'pull' for c in puts)
-    rows = data['rows']; assert len(rows) == r['raw_tables'] == 32
+    # Every migrated table plus d1_migrations; 0029 adds sweep_digest_days.
+    rows = data['rows']; assert len(rows) == r['raw_tables'] == 33
+    assert 'sweep_digest_days' in rows
     fences = rows['delivery_attempts']; assert len(fences) == 2
     assert all(f['attempt_generation'] == 1 and f['retryable'] == 0 for f in fences)
     assert {json.loads(f['command'])['requester_id'] for f in fences} == {91, 92}
