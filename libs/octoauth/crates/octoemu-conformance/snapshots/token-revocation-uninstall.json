@@ -13,7 +13,7 @@
         "x-ratelimit-resource": "core"
       },
       "body": {
-        "allow_forking": true,
+        "allow_forking": false,
         "archive_url": "<origin>/repos/<org>/<repo>/{archive_format}{/ref}",
         "archived": false,
         "assignees_url": "<origin>/repos/<org>/<repo>/assignees{/user}",
@@ -43,11 +43,11 @@
         "git_tags_url": "<origin>/repos/<org>/<repo>/git/tags{/sha}",
         "git_url": "<git-origin>/<org>/<repo>.git",
         "has_discussions": false,
-        "has_downloads": true,
+        "has_downloads": false,
         "has_issues": true,
         "has_pages": false,
         "has_projects": true,
-        "has_wiki": true,
+        "has_wiki": false,
         "homepage": "<varies>",
         "hooks_url": "<origin>/repos/<org>/<repo>/hooks",
         "html_url": "<origin>/<org>/<repo>",
@@ -183,7 +183,7 @@
         "x-ratelimit-resource": "core"
       },
       "body": {
-        "documentation_url": "https://docs.github.com/rest/apps/apps#create-an-installation-access-token-for-an-app",
+        "documentation_url": "https://docs.github.com/rest/reference/apps#create-an-installation-access-token-for-an-app",
         "message": "Not Found"
       }
     }

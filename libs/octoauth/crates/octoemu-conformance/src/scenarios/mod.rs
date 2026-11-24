@@ -98,7 +98,7 @@ pub fn all() -> Vec<Scenario> {
         ),
         scenario(
             "token-revocation-delete",
-            "A stateless installation token's shape, and DELETE /installation/token taking effect",
+            "A stateless installation token's shape, and how soon DELETE /installation/token takes effect",
             auth::token_revocation_delete,
         ),
         scenario(

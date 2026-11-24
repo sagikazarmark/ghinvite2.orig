@@ -19,9 +19,11 @@ pub const RELIED_HEADERS: &[&str] = &[
     "x-ratelimit-resource",
 ];
 
-/// Fields describing an account's or repository's profile and counts:
-/// whatever the live accounts happen to hold, not behaviour. Their value
-/// becomes `<varies>`; whether they are there is still compared.
+/// Fields describing an account's, repository's or App's profile and
+/// counts: whatever the live world happens to hold, not behaviour (the
+/// emulator's world installs the fidelity App on three organizations, the
+/// live one on as many as the operator set up). Their value becomes
+/// `<varies>`; whether they are there is still compared.
 pub const VARIES: &[&str] = &[
     "bio",
     "blog",
@@ -36,6 +38,7 @@ pub const VARIES: &[&str] = &[
     "forks_count",
     "hireable",
     "homepage",
+    "installations_count",
     "language",
     "location",
     "members_count",

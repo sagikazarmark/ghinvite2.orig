@@ -9,6 +9,24 @@ minor release may break the API, and every break gets a migration note.
 
 Not yet published; developed inside the ghinvite repository.
 
+### Changed
+
+- The first live record run (2026-11-24, a throwaway Free organization):
+  11 snapshots are GitHub's (`"source": "live"`); the 9 scenarios it
+  skipped (destructive, slow, or needing an optional extra) keep the
+  emulator's.
+- `installations_count` is `<varies>`: how many installations the App has
+  is the world's (three on the emulator), not behaviour. The live
+  snapshots' recorded counts were normalised the same way.
+- The emulator's world describes the live one: the fidelity App's homepage
+  URL is the one the setup guide registers, and the repository's settings
+  are the live private repository's (no wiki, downloads or forking).
+- `token-revocation-delete` measures how soon a revocation takes effect: it
+  polls after the `DELETE` and records whether the token was refused within
+  2 s (`revocation-propagates`), then the use after it. Right after the
+  `DELETE` GitHub sometimes still accepts the token, so the old immediate
+  use was a coin toss; re-recorded live.
+
 ### Added
 
 - The fidelity suite (GE-08): `Target::Emulator` (a fresh embedded octoemu

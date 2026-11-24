@@ -22,7 +22,7 @@
         "external_url": "<origin>/<org>",
         "html_url": "<origin>/apps/<app>",
         "id": "<app-id>",
-        "installations_count": 1,
+        "installations_count": "<varies>",
         "name": "<varies>",
         "node_id": "<node-id>",
         "owner": {
@@ -74,7 +74,7 @@
         "external_url": "<origin>/<org>",
         "html_url": "<origin>/apps/<app>",
         "id": "<app-id>",
-        "installations_count": 1,
+        "installations_count": "<varies>",
         "name": "<varies>",
         "node_id": "<node-id>",
         "owner": {
@@ -126,7 +126,7 @@
         "external_url": "<origin>/<org>",
         "html_url": "<origin>/apps/<app>",
         "id": "<app-id>",
-        "installations_count": 1,
+        "installations_count": "<varies>",
         "name": "<varies>",
         "node_id": "<node-id>",
         "owner": {
@@ -178,7 +178,7 @@
         "external_url": "<origin>/<org>",
         "html_url": "<origin>/apps/<app>",
         "id": "<app-id>",
-        "installations_count": 1,
+        "installations_count": "<varies>",
         "name": "<varies>",
         "node_id": "<node-id>",
         "owner": {
@@ -230,7 +230,7 @@
         "external_url": "<origin>/<org>",
         "html_url": "<origin>/apps/<app>",
         "id": "<app-id>",
-        "installations_count": 1,
+        "installations_count": "<varies>",
         "name": "<varies>",
         "node_id": "<node-id>",
         "owner": {
@@ -295,7 +295,7 @@
         "external_url": "<origin>/<org>",
         "html_url": "<origin>/apps/<app>",
         "id": "<app-id>",
-        "installations_count": 1,
+        "installations_count": "<varies>",
         "name": "<varies>",
         "node_id": "<node-id>",
         "owner": {

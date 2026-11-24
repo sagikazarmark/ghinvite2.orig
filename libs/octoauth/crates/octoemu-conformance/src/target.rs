@@ -297,6 +297,9 @@ pub fn emulator_seed() -> Seed {
     ];
     let mut app = App::new(APP_ID, "fidelity-app", APP_CLIENT_ID, "fidelity-app-secret")
         .owner(ORG)
+        // The homepage URL the setup guide's manifest registers
+        // (docs/live-github-tests.md: `url: https://github.com/$ORG`).
+        .external_url(format!("https://github.com/{ORG}"))
         .public_key(EMULATOR_PUBLIC_KEY)
         // Nothing listens: deliveries are recorded as failed, and the
         // deliveries API still serves them.
@@ -328,7 +331,17 @@ pub fn emulator_seed() -> Seed {
         .membership(Membership::new(ORG, OWNER, OrgRole::Admin))
         .membership(Membership::new(POLICY_ORG, OWNER, OrgRole::Admin))
         .membership(Membership::new(FULL_ORG, OWNER, OrgRole::Admin))
-        .repo(Repo::new(7001, ORG, REPO).private())
+        // The live repository's settings as recorded (2026-11-24): a
+        // private repository the setup guide creates (`gh repo create
+        // --private`) on a Free organization reads `has_wiki`,
+        // `has_downloads` and `allow_forking` false.
+        .repo(
+            Repo::new(7001, ORG, REPO)
+                .private()
+                .has_wiki(false)
+                .has_downloads(false)
+                .allow_forking(false),
+        )
         .repo(Repo::new(7002, POLICY_ORG, POLICY_REPO).private())
         .team(Team::new(8001, ORG, TEAM))
         .app(app)

@@ -192,6 +192,14 @@ pub(super) fn token_revocation_delete(ctx: &mut Ctx) -> BoxFuture<'_> {
         ctx.send("use", Req::get(&repo).bearer(&token)).await?;
         ctx.send("revoke", Req::delete("/installation/token").bearer(&token))
             .await?;
+        // GitHub's revocation takes a moment to reach every route: a use
+        // right after the DELETE is sometimes accepted, so the scenario
+        // records how soon it is refused, then a use once it is.
+        let refused_after = refused_within(ctx, &repo, &token, Duration::from_secs(5)).await?;
+        ctx.observe(
+            "revocation-propagates",
+            json!({"refused_within_2s": refused_after.is_some_and(|at| at <= Duration::from_secs(2))}),
+        );
         ctx.send("use-after-revoke", Req::get(&repo).bearer(&token))
             .await?;
         ctx.send(
@@ -201,6 +209,26 @@ pub(super) fn token_revocation_delete(ctx: &mut Ctx) -> BoxFuture<'_> {
         .await?;
         Ok(())
     })
+}
+
+/// How long after now `GET path` with `token` is first refused (polled
+/// every 100 ms, unrecorded); `None` when it is still accepted after
+/// `limit`.
+async fn refused_within(
+    ctx: &mut Ctx,
+    path: &str,
+    token: &str,
+    limit: Duration,
+) -> Result<Option<Duration>, Stop> {
+    let started = std::time::Instant::now();
+    while started.elapsed() <= limit {
+        let reply = ctx.call(Req::get(path).bearer(token)).await?;
+        if reply.status != 200 {
+            return Ok(Some(started.elapsed()));
+        }
+        ctx.pause(Duration::from_millis(100)).await;
+    }
+    Ok(None)
 }
 
 pub(super) fn token_revocation_uninstall(ctx: &mut Ctx) -> BoxFuture<'_> {
