@@ -29,3 +29,12 @@ Not yet published; developed inside the ghinvite repository.
   token of an installation, e.g. after its permissions changed); also on
   `DynInstallationTokenProvider`. Both are required: a provider implements
   them too (a provider that caches nothing does nothing).
+- `WithTokenError::map` and `WithTokenError::into_error`: convert the call's
+  error, and flatten into the caller's own error type when it implements
+  `From<TokenError>`.
+
+### Changed
+
+- `WithTokenError` is no longer `#[non_exhaustive]`: its two variants are the
+  complete outcome of a retry helper, so matching it needs no `_` arm. Not a
+  breaking change for callers.

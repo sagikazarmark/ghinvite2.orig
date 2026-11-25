@@ -1524,3 +1524,135 @@ mod events {
         assert!(lines.iter().all(|line| !line.contains("ghs_")));
     }
 }
+
+/// An app-level endpoint octoauth does not wrap.
+const REQUESTS: &str = "/app/installation-requests";
+
+/// A reqwest call's failure: the status and headers of an error response.
+#[derive(Debug)]
+struct Rejected(u16, reqwest::header::HeaderMap);
+
+/// `GET /app/installation-requests` with a plain reqwest client through
+/// [`App::with_credential`]; the status of a success.
+async fn list_requests(
+    app: &App,
+    server: &MockServer,
+) -> Result<u16, crate::WithCredentialError<Rejected>> {
+    let client = reqwest::Client::new();
+    let url = format!("{}{REQUESTS}", server.uri());
+    app.with_credential(
+        |Rejected(status, headers): &Rejected| (*status == 401).then_some(headers),
+        |credential| {
+            let request = client.get(&url).bearer_auth(credential.expose_secret());
+            async move {
+                let response = request.send().await.unwrap();
+                let status = response.status().as_u16();
+                if response.status().is_success() {
+                    Ok(status)
+                } else {
+                    Err(Rejected(status, response.headers().clone()))
+                }
+            }
+        },
+    )
+    .await
+}
+
+fn listed() -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_json(serde_json::json!([]))
+}
+
+#[tokio::test]
+async fn with_credential_corrects_skew_by_one_retry() {
+    for offset in [660, -300, 3600] {
+        let (app, _, server, _) = skewed_at("GET", REQUESTS, offset, listed()).await;
+        assert_eq!(list_requests(&app, &server).await.unwrap(), 200);
+        assert_eq!(requests(&server).await, 2, "offset {offset}");
+
+        // The correction is kept, for this and octoauth's own requests.
+        assert_eq!(list_requests(&app, &server).await.unwrap(), 200);
+        assert_eq!(requests(&server).await, 3, "offset {offset}");
+    }
+}
+
+#[tokio::test]
+async fn with_credential_needs_no_retry_within_tolerance() {
+    for offset in [-60, 0, 539] {
+        let (app, _, server, _) = skewed_at("GET", REQUESTS, offset, listed()).await;
+        assert_eq!(list_requests(&app, &server).await.unwrap(), 200);
+        assert_eq!(requests(&server).await, 1, "offset {offset}");
+    }
+}
+
+#[tokio::test]
+async fn with_credential_does_not_retry_uncorrectable_skew() {
+    let (app, _, server, _) = skewed_at("GET", REQUESTS, 7200, listed()).await;
+    let error = list_requests(&app, &server).await.unwrap_err();
+    assert!(
+        matches!(error, crate::WithCredentialError::Call(Rejected(401, _))),
+        "{error:?}"
+    );
+    assert_eq!(requests(&server).await, 1);
+}
+
+#[tokio::test]
+async fn with_credential_does_not_retry_other_rejections() {
+    // A 401 at a time GitHub accepts (a wrong key), a 401 without a `Date`,
+    // and a non-401 error: returned as they are, not retried.
+    let server = serve(vec![("GET", REQUESTS, ResponseTemplate::new(401))]).await;
+    let error = list_requests(&app_for(&server.uri()), &server)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        crate::WithCredentialError::Call(Rejected(401, _))
+    ));
+    assert_eq!(requests(&server).await, 1);
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(REQUESTS))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+    let app = app_for(&server.uri());
+    let error = list_requests(&app, &server).await.unwrap_err();
+    assert!(matches!(
+        error,
+        crate::WithCredentialError::Call(Rejected(401, _))
+    ));
+    assert_eq!(requests(&server).await, 1);
+
+    let server = serve(vec![("GET", REQUESTS, ResponseTemplate::new(500))]).await;
+    let error = list_requests(&app_for(&server.uri()), &server)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        crate::WithCredentialError::Call(Rejected(500, _))
+    ));
+    assert_eq!(requests(&server).await, 1);
+}
+
+#[tokio::test]
+async fn with_credential_errors_flatten_into_the_callers() {
+    #[derive(Debug, PartialEq)]
+    enum Mine {
+        App(Error),
+        Status(u16),
+    }
+    impl From<Error> for Mine {
+        fn from(error: Error) -> Self {
+            Self::App(error)
+        }
+    }
+
+    let call: crate::WithCredentialError<u16> = crate::WithCredentialError::Call(500);
+    assert_eq!(call.map(Mine::Status).into_error(), Mine::Status(500));
+    let signing: crate::WithCredentialError<u16> =
+        crate::WithCredentialError::Credential(Error::Signing(SigningError::Failed));
+    assert_eq!(
+        signing.map(Mine::Status).into_error(),
+        Mine::App(Error::Signing(SigningError::Failed))
+    );
+}

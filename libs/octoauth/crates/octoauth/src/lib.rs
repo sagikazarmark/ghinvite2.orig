@@ -8,8 +8,10 @@
 //! use a provider (crate `octotoken`).
 //!
 //! [`Installation::get`] reads an installation (account, permissions,
-//! suspension). For app-level endpoints the crate does not wrap,
-//! [`App::credential`] lends the app's signed credential.
+//! suspension). For app-level endpoints the crate does not wrap (e.g.
+//! `GET /app/installations`), [`App::with_credential`] runs your request with
+//! the app's signed credential and the same clock-skew correction as the
+//! crate's own requests; [`App::credential`] lends the bare credential.
 //!
 //! ```no_run
 //! # async fn example(pem: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -43,6 +45,10 @@
 //!   text, so it can be logged and journaled.
 //! - In crate `octotoken`, a provider caches tokens and `with_token` handles
 //!   a 401 (one replacement token, one retry).
+//!
+//! - For octocrab, crate `octoauth-octocrab` builds a client for the app's
+//!   API ([`App::base_url`]), converts `octocrab::Error`, and supplies the
+//!   401 signals of `with_token` and [`App::with_credential`].
 //!
 //! `octotoken`'s `examples/octocrab.rs` and `examples/reqwest.rs` show both
 //! clients set up for this: no automatic retries or redirects, errors
@@ -113,7 +119,7 @@ mod transport;
 pub use api::{ApiError, ErrorBody, ValidationCode};
 pub use app::{
     App, AppBuilder, AppCredential, AppKeySigner, DEFAULT_API_VERSION, DEFAULT_BASE_URL,
-    DEFAULT_USER_AGENT, SigningKey,
+    DEFAULT_USER_AGENT, SigningKey, WithCredentialError,
 };
 pub use error::{ConfigError, Error, ForbiddenReason, RateLimitScope, SigningError, TransientKind};
 pub use id::{AppId, InstallationId};

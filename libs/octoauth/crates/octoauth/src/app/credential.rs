@@ -107,12 +107,15 @@ impl std::fmt::Debug for Jwt {
 /// so at least 4 minutes of validity remain when [`App::credential`]
 /// returns it. Get one per request; do not keep it.
 ///
-/// Clock-skew correction happens only on octoauth's own requests. After a
-/// 401 with this credential, make one octoauth call (e.g.
-/// [`Installation::get`] for an installation you know), which re-learns
-/// the skew from GitHub's `Date`, then get a new credential and retry once.
-/// If that call fails with [`Error::AppCredentialsRejected`], do not retry:
-/// the key or the app identity is wrong, or the clock is beyond correction.
+/// Prefer [`App::with_credential`], which gives your request the clock-skew
+/// correction of octoauth's own: after a 401 that GitHub's `Date` shows a
+/// skewed host clock caused, it retries once with a corrected credential.
+/// With a bare credential from [`App::credential`], a 401 is final unless
+/// you re-learn the skew yourself: make one octoauth call (e.g.
+/// [`Installation::get`] for an installation you know), then get a new
+/// credential and retry once. If that call fails with
+/// [`Error::AppCredentialsRejected`], do not retry: the key or the app
+/// identity is wrong, or the clock is beyond correction.
 ///
 /// A secret: not `Clone`, `Display` or `Serialize`; `Debug` shows the App ID
 /// only; zeroized when the last holder (this or the app's cache) drops it.
@@ -129,6 +132,7 @@ impl std::fmt::Debug for Jwt {
 /// ```
 ///
 /// [`App::credential`]: crate::App::credential
+/// [`App::with_credential`]: crate::App::with_credential
 /// [`Installation::get`]: crate::Installation::get
 /// [`Error::AppCredentialsRejected`]: crate::Error::AppCredentialsRejected
 pub struct AppCredential {

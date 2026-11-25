@@ -26,3 +26,9 @@ Not yet published; developed inside the ghinvite repository.
   clock-skew correction and app credential signing. Their fields are IDs,
   error codes and seconds, never a secret.
 - Builds for `wasm32-unknown-unknown` (Cloudflare Workers).
+- `App::with_credential`: run a request to an app-level endpoint the crate
+  does not wrap with the app's credential and the same clock-skew
+  correction as the crate's own requests (one retry after a 401 that
+  GitHub's `Date` explains). `WithCredentialError` with `map` and
+  `into_error`.
+- `App::base_url`, to configure a client for the same API.

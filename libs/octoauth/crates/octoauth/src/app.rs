@@ -16,7 +16,8 @@ use crate::transport::{self, HttpClient};
 pub use credential::AppCredential;
 use credential::Jwt;
 use reqwest::Url;
-use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderValue, USER_AGENT};
+use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
+use std::future::Future;
 use std::sync::{Arc, Mutex};
 
 /// github.com's REST API base URL.
@@ -165,6 +166,89 @@ impl App {
         Ok(AppCredential::new(self.inner.id, self.signed(None)?))
     }
 
+    /// The REST API base URL the app sends to, as validated by
+    /// [`AppBuilder::base_url`] (it may gain a trailing `/`). Configure a
+    /// client for the same API from it.
+    pub fn base_url(&self) -> &str {
+        self.inner.base_url.as_str()
+    }
+
+    /// Run `call` with the app's credential, for app-level endpoints octoauth
+    /// does not wrap, with the clock-skew correction of octoauth's own
+    /// requests: if `call` fails with a 401 whose `Date` shows that GitHub
+    /// could not have accepted the credential at its own time, and a
+    /// credential signed with the measured correction would be accepted,
+    /// `call` runs once more with such a credential. Retrying is safe: GitHub
+    /// did not act on a 401.
+    ///
+    /// `unauthorized` returns the response headers when `call`'s error is a
+    /// 401 (they hold GitHub's `Date`), else `None`. Any other error, or a
+    /// 401 the clock does not explain (a wrong key or app identity), is
+    /// returned as [`WithCredentialError::Call`] without a retry.
+    ///
+    /// ```no_run
+    /// # async fn example(app: &octoauth::App) -> Result<(), Box<dyn std::error::Error>> {
+    /// use octoauth::{ApiError, ErrorBody, WithCredentialError};
+    ///
+    /// struct Rejected(reqwest::StatusCode, reqwest::header::HeaderMap);
+    ///
+    /// let client = reqwest::Client::new();
+    /// let body = app
+    ///     .with_credential(
+    ///         |Rejected(status, headers): &Rejected| (*status == 401).then_some(headers),
+    ///         |credential| {
+    ///             let request = client
+    ///                 .get("https://api.github.com/app/installations")
+    ///                 .bearer_auth(credential.expose_secret());
+    ///             async move {
+    ///                 let response = request.send().await.expect("example");
+    ///                 if !response.status().is_success() {
+    ///                     return Err(Rejected(response.status(), response.headers().clone()));
+    ///                 }
+    ///                 Ok(response.text().await.expect("example"))
+    ///             }
+    ///         },
+    ///     )
+    ///     .await
+    ///     .map_err(|error| match error {
+    ///         WithCredentialError::Call(Rejected(status, headers)) => {
+    ///             ApiError::classify(status, &headers, ErrorBody::Bytes(b"")).to_string()
+    ///         }
+    ///         WithCredentialError::Credential(error) => error.to_string(),
+    ///     })?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn with_credential<T, E, F, Fut>(
+        &self,
+        unauthorized: impl Fn(&E) -> Option<&HeaderMap>,
+        mut call: F,
+    ) -> Result<T, WithCredentialError<E>>
+    where
+        F: FnMut(AppCredential) -> Fut,
+        Fut: Future<Output = Result<T, E>>,
+    {
+        let rejected = self.signed(None).map_err(WithCredentialError::Credential)?;
+        let error = match call(AppCredential::new(self.inner.id, rejected.clone())).await {
+            Ok(value) => return Ok(value),
+            Err(error) => error,
+        };
+        let observed = unauthorized(&error)
+            .and_then(crate::api::response_date)
+            .and_then(|github_now| {
+                Some((github_now, github_now.checked_sub(self.inner.clock.now())?))
+            });
+        let Some((github_now, skew)) = observed else {
+            return Err(WithCredentialError::Call(error));
+        };
+        match self.corrected(&rejected, github_now, skew) {
+            Ok(Some(credential)) => call(AppCredential::new(self.inner.id, credential))
+                .await
+                .map_err(WithCredentialError::Call),
+            Ok(None) => Err(WithCredentialError::Call(error)),
+            Err(signing) => Err(WithCredentialError::Credential(signing)),
+        }
+    }
+
     /// Send a request authenticated as the app to `base_url/<segments>`,
     /// with an optional JSON body.
     ///
@@ -192,24 +276,9 @@ impl App {
         let Some((github_now, skew)) = self.observe(&response) else {
             return Err(Error::AppCredentialsRejected { clock_skew: None });
         };
-        let correction = if skew.abs() <= SKEW_DEAD_BAND {
-            0
-        } else {
-            skew.clamp(-MAX_SKEW_CORRECTION, MAX_SKEW_CORRECTION)
-        };
-        let clock_caused = !credential::accepted_at(rejected.window(), github_now);
-        // A credential signed now with `correction` (our now is GitHub's minus
-        // the skew); if even that would be rejected, retrying cannot help.
-        let fixable = github_now
-            .checked_sub(skew)
-            .and_then(|local_now| local_now.checked_add(correction))
-            .and_then(credential::window)
-            .is_some_and(|window| credential::accepted_at(window, github_now));
-        if !(clock_caused && fixable) {
+        let Some(credential) = self.corrected(&rejected, github_now, skew)? else {
             return Err(rejected_with(skew));
-        }
-        crate::event::clock_skew_corrected(self.inner.id, skew, correction);
-        let credential = self.signed(Some((correction, &rejected)))?;
+        };
         let response = self
             .send(self.build(method, segments, json, &credential))
             .await?;
@@ -226,6 +295,37 @@ impl App {
     fn observe(&self, response: &transport::Response) -> Option<(i64, i64)> {
         let github_now = response.date()?;
         Some((github_now, github_now.checked_sub(self.inner.clock.now())?))
+    }
+
+    /// After GitHub rejected `rejected` at its time `github_now` (`skew`
+    /// seconds ahead of ours): a credential signed with the measured
+    /// correction, if the clock explains the rejection (GitHub could not
+    /// have accepted `rejected` at its own time) and the correction fixes it
+    /// (GitHub would accept the new one). `None` when retrying cannot help.
+    fn corrected(
+        &self,
+        rejected: &Arc<Jwt>,
+        github_now: i64,
+        skew: i64,
+    ) -> Result<Option<Arc<Jwt>>, Error> {
+        let correction = if skew.abs() <= SKEW_DEAD_BAND {
+            0
+        } else {
+            skew.clamp(-MAX_SKEW_CORRECTION, MAX_SKEW_CORRECTION)
+        };
+        let clock_caused = !credential::accepted_at(rejected.window(), github_now);
+        // A credential signed now with `correction` (our now is GitHub's minus
+        // the skew); if even that would be rejected, retrying cannot help.
+        let fixable = github_now
+            .checked_sub(skew)
+            .and_then(|local_now| local_now.checked_add(correction))
+            .and_then(credential::window)
+            .is_some_and(|window| credential::accepted_at(window, github_now));
+        if !(clock_caused && fixable) {
+            return Ok(None);
+        }
+        crate::event::clock_skew_corrected(self.inner.id, skew, correction);
+        self.signed(Some((correction, rejected))).map(Some)
     }
 
     /// A credential to send.
@@ -318,6 +418,44 @@ impl App {
         transport::send(&self.inner.client, request)
             .await
             .map_err(Error::from)
+    }
+}
+
+/// Why [`App::with_credential`] failed. Complete: a retry helper either has
+/// no credential or returns the call's error.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum WithCredentialError<E> {
+    /// The app could not sign its credential ([`Error::Signing`]); `call`
+    /// did not run (again).
+    #[error(transparent)]
+    Credential(Error),
+
+    /// `call` failed: any error other than a 401 the clock explains, or the
+    /// retry's error. Returned as `call` produced it; if it carries upstream
+    /// text, convert it before logging or journaling.
+    #[error(transparent)]
+    Call(E),
+}
+
+impl<E> WithCredentialError<E> {
+    /// Convert the call's error with `f`, e.g. a client's error into the
+    /// caller's (`error.map(MyError::from).into_error()`).
+    pub fn map<F>(self, f: impl FnOnce(E) -> F) -> WithCredentialError<F> {
+        match self {
+            Self::Credential(error) => WithCredentialError::Credential(error),
+            Self::Call(error) => WithCredentialError::Call(f(error)),
+        }
+    }
+}
+
+impl<E: From<Error>> WithCredentialError<E> {
+    /// The caller's own error: [`Call`](Self::Call) as it is,
+    /// [`Credential`](Self::Credential) converted with `From`.
+    pub fn into_error(self) -> E {
+        match self {
+            Self::Credential(error) => error.into(),
+            Self::Call(error) => error,
+        }
     }
 }
 

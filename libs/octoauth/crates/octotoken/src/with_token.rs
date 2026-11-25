@@ -87,9 +87,10 @@ where
     call(token).await.map_err(WithTokenError::Call)
 }
 
-/// Why [`with_token`] failed.
+/// Why [`with_token`] failed. Complete: a retry helper either has no token
+/// or returns the call's error. [`into_error`](Self::into_error) flattens it
+/// into the caller's own error type.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
-#[non_exhaustive]
 pub enum WithTokenError<E> {
     /// The provider could not supply a token (or a replacement); `call` did
     /// not run (again).
@@ -101,4 +102,26 @@ pub enum WithTokenError<E> {
     /// upstream text, convert it before logging or journaling.
     #[error(transparent)]
     Call(E),
+}
+
+impl<E> WithTokenError<E> {
+    /// Convert the call's error with `f`, e.g. a client's error into the
+    /// caller's (`error.map(MyError::from).into_error()`).
+    pub fn map<F>(self, f: impl FnOnce(E) -> F) -> WithTokenError<F> {
+        match self {
+            Self::Token(error) => WithTokenError::Token(error),
+            Self::Call(error) => WithTokenError::Call(f(error)),
+        }
+    }
+}
+
+impl<E: From<TokenError>> WithTokenError<E> {
+    /// The caller's own error: [`Call`](Self::Call) as it is,
+    /// [`Token`](Self::Token) converted with `From`.
+    pub fn into_error(self) -> E {
+        match self {
+            Self::Token(error) => error.into(),
+            Self::Call(error) => error,
+        }
+    }
 }
