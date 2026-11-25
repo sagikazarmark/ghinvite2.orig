@@ -110,6 +110,9 @@ impl SignIn {
     /// Exchange the callback's `code` for a user token, proving the PKCE
     /// verifier from [`PendingAuthorization::verify`].
     ///
+    /// Prefer [`with_user_token`](Self::with_user_token), which also revokes
+    /// the token; with this, [`revoke`](Self::revoke) it on every path.
+    ///
     /// An `error` in GitHub's answer is [`SignInError::Provider`], whatever
     /// the status; the answer's `error_description` and any refresh token
     /// are discarded.

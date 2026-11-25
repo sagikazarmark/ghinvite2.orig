@@ -6,8 +6,10 @@
 //! - [`builder`]: octocrab's builder for the API an [`App`] uses (its base
 //!   URL), with bounded connect and read times and **no auth**. Build one
 //!   base client per process and derive a client per credential with
-//!   [`authenticated`]; configuring auth on the base client and then deriving
-//!   would send two `Authorization` headers.
+//!   [`authenticated`]: an installation token, the App's credential, or a
+//!   signed-in user's token (octologin's `UserToken`, for endpoints such as
+//!   `GET /user/installations`). Configuring auth on the base client and
+//!   then deriving would send two `Authorization` headers.
 //! - [`Error`]: `octocrab::Error` reduced to octoauth's [`ApiError`] (fixed
 //!   codes, GitHub's rate-limit wait, the reason for a 403) or
 //!   [`Error::Client`]. `octocrab::Error`'s `Debug` carries GitHub's message
@@ -92,9 +94,10 @@ pub fn builder(app: &App) -> octocrab::Result<Builder> {
         .base_uri(app.base_url().trim_end_matches('/'))
 }
 
-/// A client sending `secret` as its bearer token: an installation token's
-/// or the app's credential (`expose_secret` of either), derived from a base
-/// client without auth. Cheap; derive one per request.
+/// A client sending `secret` as its bearer token, derived from a base client
+/// without auth: the `expose_secret` of an installation token, of the App's
+/// credential, or of a user token from octologin (whose API base is the
+/// App's too). Cheap; derive one per request.
 pub fn authenticated(base: &Octocrab, secret: &str) -> octocrab::Result<Octocrab> {
     base.user_access_token(secret.to_owned())
 }

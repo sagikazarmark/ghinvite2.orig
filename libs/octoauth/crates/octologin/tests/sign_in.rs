@@ -605,3 +605,126 @@ async fn identities_must_be_real() {
         );
     }
 }
+
+/// An exchange that yields `token()`, `GET /user`, and a revocation
+/// answering `revoke_status`.
+async fn with_user_token_server(revoke_status: u16) -> MockServer {
+    let server = MockServer::start().await;
+    mount_exchange(
+        &server,
+        ResponseTemplate::new(200).set_body_json(token_answer()),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/user"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": 42, "login": "octocat"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/applications/Iv1.signin/token"))
+        .respond_with(ResponseTemplate::new(revoke_status))
+        .mount(&server)
+        .await;
+    server
+}
+
+async fn revocations(server: &MockServer) -> usize {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.method.as_str() == "DELETE")
+        .count()
+}
+
+#[tokio::test]
+async fn with_user_token_reads_then_revokes() {
+    let server = with_user_token_server(204).await;
+    let sign_in = sign_in(&server);
+    let signed_in = sign_in
+        .with_user_token("CODE_MARKER", &verifier(), async |token| {
+            assert_eq!(token.expose_secret(), self::token());
+            sign_in.user(token).await
+        })
+        .await
+        .unwrap();
+    assert_eq!(signed_in.value.id, UserId::new(42));
+    assert_eq!(signed_in.revocation, Ok(()));
+    let requests = server.received_requests().await.unwrap();
+    let paths: Vec<_> = requests.iter().map(|r| r.url.path()).collect();
+    assert_eq!(
+        paths,
+        [
+            "/login/oauth/access_token",
+            "/user",
+            "/applications/Iv1.signin/token"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn with_user_token_revokes_after_a_failed_read() {
+    let server = with_user_token_server(204).await;
+    let sign_in = sign_in(&server);
+    let error = sign_in
+        .with_user_token("CODE_MARKER", &verifier(), async |_| {
+            Err::<(), _>("read failed")
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error, octologin::WithUserTokenError::Call("read failed"));
+    assert_eq!(revocations(&server).await, 1);
+}
+
+#[tokio::test]
+async fn with_user_token_reports_a_failed_revocation() {
+    let server = with_user_token_server(500).await;
+    let sign_in = sign_in(&server);
+    let signed_in = sign_in
+        .with_user_token("CODE_MARKER", &verifier(), async |token| {
+            sign_in.user(token).await
+        })
+        .await
+        .unwrap();
+    assert_eq!(signed_in.value.login, "octocat");
+    let error = signed_in.revocation.unwrap_err();
+    assert!(error.to_string().starts_with("gh:"), "{error}");
+    assert_eq!(revocations(&server).await, 1);
+}
+
+#[tokio::test]
+async fn with_user_token_without_a_token_neither_reads_nor_revokes() {
+    let server = MockServer::start().await;
+    mount_exchange(
+        &server,
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "error": "bad_verification_code"
+        })),
+    )
+    .await;
+    let sign_in = sign_in(&server);
+    let error = sign_in
+        .with_user_token(
+            "CODE_MARKER",
+            &verifier(),
+            async |_| -> Result<(), SignInError> { panic!("read ran without a token") },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            octologin::WithUserTokenError::SignIn(SignInError::Provider {
+                code: OAuthErrorCode::BadVerificationCode,
+                ..
+            })
+        ),
+        "{error:?}"
+    );
+    // Flattened into the caller's error.
+    assert!(matches!(error.into_error(), SignInError::Provider { .. }));
+    assert_eq!(revocations(&server).await, 0);
+}

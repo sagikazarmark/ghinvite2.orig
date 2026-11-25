@@ -21,3 +21,4 @@ Not yet published; developed inside the ghinvite repository.
 - `is_unauthorized` and `unauthorized`: the 401 signals of octotoken's
   `with_token` and `octoauth::App::with_credential`.
 - Built against octocrab 0.54.
+- `authenticated` documents user tokens (octologin's `UserToken`) as well.

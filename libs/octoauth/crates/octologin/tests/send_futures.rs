@@ -13,6 +13,9 @@ fn request_futures_are_send(sign_in: &SignIn, token: UserToken) {
     assert_send(sign_in.user(&token));
     assert_send(sign_in.emails(&token));
     assert_send(sign_in.revoke(token));
+    assert_send(
+        sign_in.with_user_token("code", "verifier", async |token| sign_in.user(token).await),
+    );
 }
 
 #[test]

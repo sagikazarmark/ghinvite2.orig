@@ -16,3 +16,9 @@ Not yet published; developed inside the ghinvite repository.
   persists a token.
 - `SignInError` with stable codes, listed in the workspace's
   `error-codes.txt`.
+- `SignIn::with_user_token`: exchange the code, run a closure with the user
+  token, then always revoke it; the outcome of the revocation comes back in
+  `Revoked`, and errors in `WithUserTokenError` (`map`, `into_error`).
+- Crate docs: reading with the user token through another client, and the
+  setup redirect (a callback with a code but no `state` after an
+  installation is not exchanged).

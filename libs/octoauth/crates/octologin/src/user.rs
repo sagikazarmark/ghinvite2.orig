@@ -29,9 +29,9 @@ impl std::fmt::Display for UserId {
 /// (client ID) that obtained it.
 ///
 /// Not `Clone`, `Serialize` or `Display`; `Debug` is redacted; the secret is
-/// zeroized when dropped. Read the user with it and
-/// [revoke](crate::SignIn::revoke) it when done: signing in needs nothing
-/// longer-lived.
+/// zeroized when dropped. Use it inside
+/// [`SignIn::with_user_token`](crate::SignIn::with_user_token), which revokes
+/// it afterwards: signing in needs nothing longer-lived.
 pub struct UserToken {
     secret: Zeroizing<String>,
     client_id: String,
