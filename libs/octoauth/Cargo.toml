@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/*"]
+members = ["crates/*", "examples/*"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +11,7 @@ publish = false
 
 [workspace.dependencies]
 octoauth = { version = "0.1.0", path = "crates/octoauth" }
+octoauth-octocrab = { version = "0.1.0", path = "crates/octoauth-octocrab" }
 # Native-only test dependency (octologin's tests/emulator.rs).
 octoemu = { version = "0.1.0", path = "crates/octoemu" }
 octoscrub = { version = "0.1.0", path = "crates/octoscrub" }

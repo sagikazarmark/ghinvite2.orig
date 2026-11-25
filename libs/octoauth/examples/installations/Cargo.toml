@@ -1,0 +1,31 @@
+[package]
+name = "example-installations"
+description = "Example GitHub App: list the accounts the App is installed on and the repositories each installation reaches"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+# An example, never published (even once the toolkit's crates are).
+publish = false
+
+[[bin]]
+name = "installations"
+path = "src/main.rs"
+
+# Native only: a command-line program. On wasm32 the library and the binary
+# are empty, so a `--workspace` wasm32 check still passes.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+octoauth-octocrab.workspace = true
+octotoken.workspace = true
+# The client and TLS features octoauth-octocrab leaves to the application. No
+# `retry` and no `follow-redirect` (see octoauth-octocrab's docs). No `jwt`
+# either: octoauth signs the App's credential and mints the tokens.
+octocrab = { workspace = true, features = ["default-client", "rustls", "rustls-ring", "timeout"] }
+thiserror.workspace = true
+tokio.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+chrono.workspace = true
+octoemu.workspace = true
+# Revokes a token in the tests (`DELETE /installation/token`).
+reqwest.workspace = true

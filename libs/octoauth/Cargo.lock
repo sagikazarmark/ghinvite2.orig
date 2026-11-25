@@ -654,6 +654,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "example-installations"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "octoauth-octocrab",
+ "octocrab",
+ "octoemu",
+ "octotoken",
+ "reqwest 0.12.28",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "fancy-regex"
 version = "0.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1594,6 +1608,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "octoauth-octocrab"
+version = "0.1.0"
+dependencies = [
+ "http",
+ "octoauth",
+ "octocrab",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
 name = "octocrab"
 version = "0.54.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1720,6 +1747,7 @@ dependencies = [
  "futures-util",
  "js-sys",
  "octoauth",
+ "octoauth-octocrab",
  "octocrab",
  "reqwest 0.12.28",
  "send_wrapper",

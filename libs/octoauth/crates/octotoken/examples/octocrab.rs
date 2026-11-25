@@ -18,54 +18,22 @@
 //!   GitHub's requested wait.
 //! - **No redirects**: the `follow-redirect` feature is off.
 //! - **Errors converted at the boundary.** `octocrab::Error`'s `Debug` carries
-//!   GitHub's message (or the raw body) and every response header. Convert it
-//!   to [`ApiError`] before it reaches a log, a durable journal or a webhook
+//!   GitHub's message (or the raw body) and every response header.
+//!   `octoauth_octocrab::Error` converts it to `ApiError` (or a fixed
+//!   client error) before it reaches a log, a durable journal or a webhook
 //!   handler's error (ADR 0003).
 //! - **401 handled by [`with_token`]**: one replacement token, one retry.
 //!
 //! octocrab buffers response bodies with no size limit; behind an untrusted
 //! proxy, cap them in a custom service (`OctocrabBuilder::with_service`).
 
+use octoauth_octocrab::Error as CallError;
 use octocrab::Octocrab;
 use octotoken::{
-    Access, ApiError, AppTokenProvider, ErrorBody, InstallationId, InstallationTokenProvider,
-    OrganizationPermission, Permissions, TokenScope, WithTokenError, octoauth, with_token,
+    Access, AppTokenProvider, InstallationId, InstallationTokenProvider, OrganizationPermission,
+    Permissions, TokenScope, WithTokenError, octoauth, with_token,
 };
 use std::time::Duration;
-
-/// Why a call failed, without any upstream text.
-#[derive(Debug)]
-enum CallError {
-    /// GitHub answered with an error.
-    Api(ApiError),
-    /// No (complete) answer, or one octocrab could not decode. The details
-    /// are octocrab's, which may quote the response, so they are dropped.
-    Client,
-}
-
-impl From<octocrab::Error> for CallError {
-    fn from(error: octocrab::Error) -> Self {
-        classify(&error).map_or(Self::Client, Self::Api)
-    }
-}
-
-/// The bridge from octocrab's error to [`ApiError`]. octocrab hands over the
-/// body already parsed; when the body was not JSON it puts the raw text in
-/// `message`, which then simply matches no template.
-fn classify(error: &octocrab::Error) -> Option<ApiError> {
-    let octocrab::Error::GitHub { source, .. } = error else {
-        return None;
-    };
-    let headers = source.headers.clone().unwrap_or_default();
-    Some(ApiError::classify(
-        source.status_code,
-        &headers,
-        ErrorBody::Parsed {
-            message: Some(&source.message),
-            errors: source.errors.as_deref().unwrap_or_default(),
-        },
-    ))
-}
 
 /// The base client: no auth, no retries, bounded connect and read times.
 fn base_client(base_uri: Option<&str>) -> octocrab::Result<Octocrab> {
@@ -89,12 +57,11 @@ async fn pending_invitations(
         Permissions::new([(OrganizationPermission::Members, Access::Read)])
             .expect("a valid permission set"),
     );
-    let unauthorized = |e: &CallError| matches!(e, CallError::Api(e) if e.is_unauthorized());
     with_token(
         tokens,
         installation,
         &scope,
-        unauthorized,
+        CallError::is_unauthorized,
         |token| async move {
             let github = base.user_access_token(token.expose_secret().to_owned())?;
             let page = github.orgs(org).invitations().list().send().await?;
@@ -139,6 +106,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use octotoken::ApiError;
     use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
