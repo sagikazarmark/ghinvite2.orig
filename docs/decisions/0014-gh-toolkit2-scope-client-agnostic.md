@@ -102,7 +102,7 @@ These refine decisions 5 and 6 for the first consumer. They don't change the dec
 These apply decision 5; they don't change the decision.
 
 - **Trigger:** the toolkit's example GitHub App (`libs/octoauth/examples/installations`, a CLI listing the App's installations and their repositories, tested against octoemu) copied the octocrab error conversion of `crates/octotoken/examples/octocrab.rs` word for word. That is the duplication decision 5 waited for, though from an example, not a second product.
-- **`octoauth-octocrab`** (new crate in the toolkit workspace) is the first part of decision 5's deferred octocrab adapter:
+- **`octoauth-octocrab`** (new crate in the toolkit workspace, `libs/octoauth`) is the first part of decision 5's deferred octocrab adapter:
   - `builder(&App)`: octocrab's builder for the App's API base, with bounded connect and read times and no auth; `authenticated` derives a client per credential;
   - `Error`: `octocrab::Error` reduced to `ApiError` or a fixed `gh:octocrab:client`, without upstream text (the conversion this ADR's consequences require);
   - `is_unauthorized` and `unauthorized`: the 401 signals for `with_token` and `App::with_credential`.
@@ -110,6 +110,14 @@ These apply decision 5; they don't change the decision.
 - **Still deferred:** the hardened service stack (body cap, refusing redirects in a custom service), the Workers transport for octocrab, and the octoevents glue. The adapter documents leaving octocrab's `retry` and `follow-redirect` features off; Cargo feature unification means it cannot enforce that. It is native-only.
 - **`App::with_credential`** (octoauth) gives requests to app-level endpoints the crate does not wrap the same clock-skew correction as its own requests: one retry after a 401 that GitHub's `Date` explains. Before, a request built from `App::credential` failed for good on a skewed host clock unless the caller first made an octoauth call to re-learn the skew.
 - **`WithTokenError`** (octotoken) is no longer `#[non_exhaustive]` and gains `map` and `into_error`; the new `WithCredentialError` has the same shape.
+
+## Amendment notes (2026-11-25, the emulator leaves the toolkit)
+
+This narrows what the toolkit ships; it doesn't change the decision.
+
+- **octoemu is not part of the toolkit** (decided by the user). It is about three times the size of the toolkit's other crates, covers only ghinvite's GitHub surface, and as a published crate it would commit the toolkit to emulator fidelity for every user. It stays as ghinvite's test infrastructure.
+- **Home:** `octoemu` and `octoemu-conformance` moved to their own workspace, `libs/octoemu`, consumed by path like the toolkit (`docs/specs/github-emulator.md` §7, decision 1 amended).
+- **The toolkit no longer depends on it.** Its tests use wiremock; octologin's end-to-end sign-in against the emulator moved into the emulator's tests, which use the toolkit's crates by path.
 
 ## Evidence
 

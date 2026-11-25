@@ -227,6 +227,7 @@ Every route and every modelled behaviour has an entry in a checked-in manifest (
 Accepted on 2026-11-15:
 
 1. **Name and home: `octoemu`, at `libs/octoauth/crates/octoemu`,** a native-only crate in the toolkit workspace. This lifts the HANDOFF §4 deferral for the emulator only. Extracting ghinvite-github's transport, REST and pagination plumbing stays deferred. On 2026-11-15, `octoemu`, `octofake`, `octosim`, `octostub`, `octomock` and `github-emulator` were all unregistered on crates.io.
+   **Amended 2026-11-25 (user decision):** octoemu is ghinvite's test infrastructure, not part of the GitHub App toolkit, so the toolkit can be extracted and published without it. It and `octoemu-conformance` moved to their own workspace, `libs/octoemu` (consumed by path, like the toolkit), with the toolkit's dependency versions kept as locked. The toolkit's crates no longer depend on it: octologin's emulator test moved to `libs/octoemu/crates/octoemu/tests/octologin.rs`, and the toolkit's example App tests against wiremock. CI runs it in its own `emulator` job (`dagger check ghinvite:emulator`). Earlier paths in this spec name the old home.
 2. **vercel-labs/emulate is a design reference only.** No code is ported from it. Its state model differs from GitHub's in places that matter here, such as membership state.
 3. **The first release covers ghinvite's routes only.** Everything else returns 501.
 
