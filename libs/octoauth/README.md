@@ -10,7 +10,7 @@ extracted to its own repository once a second product uses it.
 | `octoauth` | App JWT (RS256, cached, clock-skew corrected), installation access tokens, `Installation::get`, `App::with_credential` (app-level requests with the same skew correction), a public `ApiError::classify` for GitHub REST responses |
 | `octotoken` | `InstallationTokenProvider` trait, the in-memory `AppTokenProvider` cache, `with_token` (one 401 → one replacement → one retry), the object-safe `DynInstallationTokenProvider` and the isolate-scope `ProviderRegistry` |
 | `octoauth-octocrab` | octocrab glue: a client builder for the App's API, `octocrab::Error` converted to `ApiError` without upstream text, the 401 signals for `with_token` and `App::with_credential`. Separate from octoauth so octocrab's breaking releases stay out of octoauth's versions |
-| `octologin` | Sign-in web flow: authorize URL with state + PKCE, code exchange, `GET /user`, verified emails, token revocation. Never persists a token |
+| `octologin` | Sign-in web flow: authorize URL with state + PKCE, code exchange, `GET /user`, verified emails, token revocation; `with_user_token` (exchange, read, always revoke). Never persists a token |
 | `octoscrub` | Pattern-based scrubbing of tokens, Basic/Bearer credentials and JWTs from log text |
 
 Design and scope: `../../docs/decisions/0014-gh-toolkit2-scope-client-agnostic.md`
@@ -19,10 +19,15 @@ Design and scope: `../../docs/decisions/0014-gh-toolkit2-scope-client-agnostic.m
 plan `../../docs/specs/octoauth-plan.md`. Examples of attaching a token to
 `octocrab` and `reqwest` are in `crates/octotoken/examples/`.
 
-`examples/installations` is a complete, minimal GitHub App (a CLI that lists
-the App's installations and their repositories), tested against a
-local GitHub stand-in (wiremock). Its README lists the friction it found in
-the toolkit.
+Two complete, minimal GitHub Apps, each tested against a local GitHub
+stand-in (wiremock); their READMEs list the friction they found in the
+toolkit:
+
+- `examples/installations`: a CLI that lists the App's installations and
+  their repositories (the App's credential, installation tokens).
+- `examples/repositories`: a web app with sign-in with GitHub that lists
+  the App's repositories the signed-in user can access too (a user token at
+  sign-in, installation tokens per page view, sessions, the setup redirect).
 
 The GitHub emulator, `octoemu`, is not part of the toolkit: it is ghinvite's
 test infrastructure, in its own workspace at `../octoemu`. Its tests run the
@@ -52,7 +57,7 @@ cargo check --locked -p octoauth -p octotoken -p octologin -p octoscrub --target
 cargo check --locked -p octoauth -p octotoken -p octologin -p octoscrub --all-features --target wasm32-unknown-unknown
 ```
 
-`octoauth-octocrab` and `examples/installations` are native-only and left
+`octoauth-octocrab` and the examples are native-only and left
 out of the wasm32 checks; on wasm32 they compile to empty crates, so a
 `--workspace` wasm32 check still passes. (octocrab on Workers needs its own
 transport, which is unverified; ADR 0014.)
@@ -71,4 +76,9 @@ Hardening before a second consumer (HANDOFF §3.5, tier (a)), done:
 
 Known gaps (tier (b), deferred; tracked in the ghinvite issue tracker): no
 acting-grant exchange or `rotcred` `Refresher` adapter, no
-`check_token`/`delete_grant`, no user-installation listing.
+`check_token`/`delete_grant`.
+
+Not planned: listing what a signed-in user may access
+(`GET /user/installations`). It is a plain API call with the user token, so
+it belongs to the application's client (ADR 0014 §1); `examples/repositories`
+does it with octocrab, inside `SignIn::with_user_token`.

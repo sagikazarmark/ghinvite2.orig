@@ -1,0 +1,35 @@
+[package]
+name = "example-repositories"
+description = "Example GitHub App web app: sign in with GitHub, then see the App's repositories you can access"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+# An example, never published (even once the toolkit's crates are).
+publish = false
+
+[[bin]]
+name = "repositories"
+path = "src/main.rs"
+
+# Native only: a web server. On wasm32 the library and the binary are empty,
+# so a `--workspace` wasm32 check still passes.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+octoauth-octocrab.workspace = true
+octologin.workspace = true
+octotoken.workspace = true
+# The client and TLS features octoauth-octocrab leaves to the application. No
+# `retry`, `follow-redirect` or `jwt` (see the installations example).
+octocrab = { workspace = true, features = ["default-client", "rustls", "rustls-ring", "timeout"] }
+
+axum.workspace = true
+base64.workspace = true
+getrandom_02.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+serde_json.workspace = true
+tower.workspace = true
+wiremock.workspace = true

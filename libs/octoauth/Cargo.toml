@@ -12,10 +12,12 @@ publish = false
 [workspace.dependencies]
 octoauth = { version = "0.1.0", path = "crates/octoauth" }
 octoauth-octocrab = { version = "0.1.0", path = "crates/octoauth-octocrab" }
+octologin = { version = "0.1.0", path = "crates/octologin" }
 octoscrub = { version = "0.1.0", path = "crates/octoscrub" }
 octotoken = { version = "0.1.0", path = "crates/octotoken" }
 
 async-trait = "0.1"
+axum = { version = "0.8", default-features = false, features = ["http1", "query", "tokio"] }
 base64 = "0.22"
 bytes = "1.10.0"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
@@ -37,6 +39,7 @@ static_assertions = "1.1.0"
 subtle = "2.6.1"
 thiserror = "2"
 tokio = { version = "1", default-features = false, features = ["macros", "rt", "rt-multi-thread", "net", "io-util"] }
+tower = { version = "0.5", default-features = false, features = ["util"] }
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 url = "2.5.4"
 wiremock = "0.6"
