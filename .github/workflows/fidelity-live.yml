@@ -1,6 +1,6 @@
 # octoemu's fidelity suite against real GitHub (docs/specs/github-emulator.md
 # §4, GE-08). Manual only: it never runs on push or pull requests. It writes
-# the live env file (format: libs/octoauth/crates/octoemu/README.md) from
+# the live env file (format: libs/octoemu/crates/octoemu/README.md) from
 # repository secrets into the runner's temp directory, outside the checkout,
 # and removes it afterwards. Destructive scenarios use up real invitation
 # budget and the uninstall scenario needs a reinstall by hand: run them only
@@ -42,7 +42,7 @@ jobs:
     timeout-minutes: 30
     defaults:
       run:
-        working-directory: libs/octoauth
+        working-directory: libs/octoemu
     steps:
       - uses: actions/checkout@v4
         with:
@@ -50,7 +50,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.100.0
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: libs/octoauth
+          workspaces: libs/octoemu
       - name: Write the live env file from secrets
         env:
           APP_ID: ${{ secrets.OCTOEMU_LIVE_APP_ID }}
@@ -117,6 +117,6 @@ jobs:
           name: fidelity-live-${{ github.run_id }}
           path: |
             ${{ runner.temp }}/fidelity-live.json
-            libs/octoauth/crates/octoemu-conformance/snapshots
+            libs/octoemu/crates/octoemu-conformance/snapshots
           if-no-files-found: ignore
           retention-days: 7

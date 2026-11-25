@@ -37,8 +37,10 @@ toml.workspace = true
 tower = { version = "0.5", features = ["util"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-# The real clients, run against an embedded emulator (tests/app_auth.rs).
+# The real clients, run against an embedded emulator (tests/app_auth.rs,
+# tests/octologin.rs).
 octoauth.workspace = true
+octologin.workspace = true
 octotoken.workspace = true
 reqwest.workspace = true
 tokio.workspace = true

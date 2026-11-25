@@ -32,8 +32,3 @@ zeroize.workspace = true
 static_assertions.workspace = true
 tokio.workspace = true
 wiremock.workspace = true
-
-# The sign-in flow against the GitHub emulator (tests/emulator.rs). Native
-# only: never in a wasm32 graph.
-[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-octoemu.workspace = true

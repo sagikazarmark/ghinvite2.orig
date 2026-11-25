@@ -13,7 +13,7 @@ use octologin::{
 use std::collections::BTreeMap;
 use std::time::{Duration, UNIX_EPOCH};
 
-const PUBLIC_KEY: &str = include_str!("../../octoemu/tests/fixtures/rsa2048.pub.pem");
+const PUBLIC_KEY: &str = include_str!("fixtures/rsa2048.pub.pem");
 const CLIENT_ID: &str = "Iv23.signin";
 const SECRET: &str = "signin-client-secret";
 const CALLBACK: &str = "https://app.test/callback";

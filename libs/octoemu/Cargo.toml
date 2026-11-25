@@ -1,0 +1,45 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+# octoemu, the GitHub App emulator, and its fidelity suite: ghinvite's test
+# infrastructure, not part of the GitHub App toolkit (libs/octoauth). Its own
+# workspace, like the toolkit's, so its dependency versions stay independent
+# of the application's; consumed by path. The toolkit's crates are path
+# dependencies: the emulator's tests run them against it.
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+octoemu = { version = "0.1.0", path = "crates/octoemu" }
+# The GitHub App toolkit, run against the emulator in its tests.
+octoauth = { version = "0.1.0", path = "../octoauth/crates/octoauth" }
+octologin = { version = "0.1.0", path = "../octoauth/crates/octologin" }
+octoscrub = { version = "0.1.0", path = "../octoauth/crates/octoscrub" }
+octotoken = { version = "0.1.0", path = "../octoauth/crates/octotoken" }
+
+# The emulator's HTTP server.
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "matched-path", "query"] }
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+# Signs its installation tokens (HS256).
+hmac = "0.13"
+regex = "1.12.2"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
+rsa = { version = "0.10", default-features = false, features = ["std", "encoding", "pkcs1v15"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The legacy `X-Hub-Signature` (HMAC-SHA1) on webhooks.
+sha1 = "0.11"
+sha2 = "0.11"
+thiserror = "2"
+tokio = { version = "1", default-features = false, features = ["macros", "rt", "rt-multi-thread", "net", "io-util"] }
+# Parses its `fidelity.toml` manifest.
+toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
+url = "2.5.4"

@@ -33,9 +33,9 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 const PRIVATE_KEY: &str =
-    include_str!("../../../libs/octoauth/crates/octoemu/tests/fixtures/rsa2048.pem");
+    include_str!("../../../libs/octoemu/crates/octoemu/tests/fixtures/rsa2048.pem");
 const PUBLIC_KEY: &str =
-    include_str!("../../../libs/octoauth/crates/octoemu/tests/fixtures/rsa2048.pub.pem");
+    include_str!("../../../libs/octoemu/crates/octoemu/tests/fixtures/rsa2048.pub.pem");
 
 /// The org App's ID (`GH_ORG_APP_ID` in the drivers).
 const ORG_APP: u64 = 456;

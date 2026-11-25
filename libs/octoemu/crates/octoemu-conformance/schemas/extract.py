@@ -13,11 +13,11 @@ this script with `python3 -I` so nothing is imported from beside it:
 
     mkdir -p "$SCRATCH/restdesc" && cd "$SCRATCH/restdesc"
     curl -sSLO https://raw.githubusercontent.com/github/rest-api-description/$COMMIT/descriptions-next/api.github.com/api.github.com.2022-11-28.json
-    python3 -I libs/octoauth/crates/octoemu-conformance/schemas/extract.py \
+    python3 -I libs/octoemu/crates/octoemu-conformance/schemas/extract.py \
         --description "$SCRATCH/restdesc/api.github.com.2022-11-28.json" \
         --commit "$COMMIT" \
-        --fidelity libs/octoauth/crates/octoemu/fidelity.toml \
-        --out libs/octoauth/crates/octoemu-conformance/schemas/rest-api-subset.json
+        --fidelity libs/octoemu/crates/octoemu/fidelity.toml \
+        --out libs/octoemu/crates/octoemu-conformance/schemas/rest-api-subset.json
 
 Standard library only (tomllib needs Python 3.11+).
 """

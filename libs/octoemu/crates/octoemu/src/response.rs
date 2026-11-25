@@ -11,7 +11,7 @@ use serde::Serialize;
 pub(crate) const JSON: &str = "application/json; charset=utf-8";
 
 /// `documentation_url` of octoemu's own errors (501, admin API).
-pub(crate) const OCTOEMU_DOCS: &str = "https://github.com/sagikazarmark/ghinvite2.orig/blob/main/libs/octoauth/crates/octoemu/README.md";
+pub(crate) const OCTOEMU_DOCS: &str = "https://github.com/sagikazarmark/ghinvite2.orig/blob/main/libs/octoemu/crates/octoemu/README.md";
 
 /// GitHub's REST documentation root, the default `documentation_url`.
 pub(crate) const REST_DOCS: &str = "https://docs.github.com/rest";

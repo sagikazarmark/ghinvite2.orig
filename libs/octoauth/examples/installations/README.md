@@ -39,16 +39,18 @@ GITHUB_APP_ID=123 GITHUB_APP_KEY=path/to/app.private-key.pem \
     cargo run -p example-installations
 ```
 
-Against octoemu: start `cargo run -p octoemu -- --seed seed.json` with an App
-whose public key is `tests/fixtures/rsa2048.pub.pem`, then add
+Against ghinvite's GitHub emulator: from the repository root, start
+`cargo run --manifest-path libs/octoemu/Cargo.toml -p octoemu -- --seed seed.json`
+with an App whose public key is
+`libs/octoemu/crates/octoemu/tests/fixtures/rsa2048.pub.pem`, then add
 `GITHUB_API_URL=<api_base>` and use `tests/fixtures/rsa2048.pem` as the key.
 
 ## Tests
 
-`tests/emulator.rs` runs the lister against an embedded octoemu: paging
-(pages of 2), a selected-repositories installation, a suspended installation
-(`gh:installation_suspended`) and a token revoked behind the provider's back
-(exactly one replacement).
+`tests/github.rs` runs the lister against a local GitHub stand-in (wiremock):
+paging (pages of 2), a selected-repositories installation, a suspended
+installation (`gh:installation_suspended`) and a revoked token (exactly one
+replacement).
 
 ```sh
 cargo test -p example-installations
@@ -57,8 +59,7 @@ cargo test -p example-installations
 ## What it needs from the toolkit
 
 - **Crates:** `octotoken` (it re-exports `octoauth`) and
-  `octoauth-octocrab`; `octoemu` as a dev-dependency. Not `octologin` or
-  `octoscrub`.
+  `octoauth-octocrab`. Not `octologin` or `octoscrub`.
 
 ## Friction found, and what became of it
 

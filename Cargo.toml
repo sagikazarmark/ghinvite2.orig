@@ -21,7 +21,7 @@ members = [
 # `libs/octoauth` is its own workspace (the GitHub App toolkit); consumed by path.
 # kekring's fuzz targets and anykms conformance run are workspaces of their own too
 # (see libs/kekring/README.md).
-exclude = ["libs/octoauth", "libs/kekring/fuzz", "libs/kekring/conformance"]
+exclude = ["libs/octoauth", "libs/octoemu", "libs/kekring/fuzz", "libs/kekring/conformance"]
 
 [workspace.package]
 version = "0.1.0"
@@ -90,7 +90,7 @@ ghinvite-github = { path = "crates/ghinvite-github" }
 octoauth = { path = "libs/octoauth/crates/octoauth" }
 octotoken = { path = "libs/octoauth/crates/octotoken" }
 # Test-only, native-only GitHub emulator: dev-dependency of ghinvite-github.
-octoemu = { path = "libs/octoauth/crates/octoemu" }
+octoemu = { path = "libs/octoemu/crates/octoemu" }
 ghinvite-storage-sqlx = { path = "crates/ghinvite-storage-sqlx" }
 ghinvite-storage-d1 = { path = "crates/ghinvite-storage-d1" }
 ghinvite-workflows = { path = "crates/ghinvite-workflows" }

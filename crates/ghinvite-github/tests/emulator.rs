@@ -20,9 +20,9 @@ use octoemu::seed::{
 use std::sync::Arc;
 
 const PRIVATE_KEY: &str =
-    include_str!("../../../libs/octoauth/crates/octoemu/tests/fixtures/rsa2048.pem");
+    include_str!("../../../libs/octoemu/crates/octoemu/tests/fixtures/rsa2048.pem");
 const PUBLIC_KEY: &str =
-    include_str!("../../../libs/octoauth/crates/octoemu/tests/fixtures/rsa2048.pub.pem");
+    include_str!("../../../libs/octoemu/crates/octoemu/tests/fixtures/rsa2048.pub.pem");
 
 const INSTALLATION: u64 = 5;
 const WIDGETS: Repository<'static> = Repository {

@@ -66,7 +66,7 @@ logging, or Wasm-import bypasses.
 ## GitHub: the octoemu emulator
 
 Every driver's GitHub is the
-[octoemu](../../libs/octoauth/crates/octoemu/README.md) emulator, never an
+[octoemu](../../libs/octoemu/crates/octoemu/README.md) emulator, never an
 inline fake. `octoemu.mjs` starts the binary on a free loopback port
 (`--port 0 --idle-timeout`), seeds it through the admin API and stops it;
 the Workers reach it through the `GITHUB_API_BASE`, `GITHUB_WEB_BASE` and

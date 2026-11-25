@@ -155,7 +155,7 @@ loopback processes. Its underlying build commands are:
 ```sh
 cargo build --locked -p ghinvite-workflows-server --features bridge-fixture \
   --example native-bridge-endpoint --message-format=json
-cargo build --locked --manifest-path libs/octoauth/Cargo.toml --target-dir target \
+cargo build --locked --manifest-path libs/octoemu/Cargo.toml --target-dir target \
   -p octoemu --bin octoemu --message-format=json
 node tests/worker/build.mjs workflows
 ```

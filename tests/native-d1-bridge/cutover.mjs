@@ -68,7 +68,7 @@ const id=()=> '01'+randomBytes(12).toString('hex').toUpperCase();
 const githubSeed={users:[{id:7,login:'user-7'},{id:91,login:'user-91'},{id:92,login:'user-92'}],
  orgs:[{id:100,login:'acme',created_at:'2020-01-01T00:00:00Z'}],memberships:[{org:'acme',user:'user-7',role:'admin',state:'active'}],
  repos:[{id:10,owner:'acme',name:'api',private:true},{id:11,owner:'acme',name:'web',private:true}],
- apps:[{id:123,slug:'p1-repo',client_id:'Iv.fixture-repo',client_secret:'fixture-repo-secret',public_keys:[readFileSync(new URL('../../libs/octoauth/crates/octoemu/tests/fixtures/rsa2048.pub.pem',import.meta.url),'utf8')],permissions:{administration:'write',metadata:'read'}}],
+ apps:[{id:123,slug:'p1-repo',client_id:'Iv.fixture-repo',client_secret:'fixture-repo-secret',public_keys:[readFileSync(new URL('../../libs/octoemu/crates/octoemu/tests/fixtures/rsa2048.pub.pem',import.meta.url),'utf8')],permissions:{administration:'write',metadata:'read'}}],
  installations:[{id:1,app_id:123,account:'acme',repository_selection:'all',created_at:'2026-01-01T00:00:00Z'}]};
 // The provider writes as the old stub's ledger recorded them, from the emulator's call
 // log: method, path without the query, the requested permission and the status.

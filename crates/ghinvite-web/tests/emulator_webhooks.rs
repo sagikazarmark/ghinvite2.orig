@@ -30,9 +30,9 @@ mod common;
 use common::restate_recorder::{RecordedCall, RestateRecorder};
 
 const PRIVATE_KEY: &str =
-    include_str!("../../../libs/octoauth/crates/octoemu/tests/fixtures/rsa2048.pem");
+    include_str!("../../../libs/octoemu/crates/octoemu/tests/fixtures/rsa2048.pem");
 const PUBLIC_KEY: &str =
-    include_str!("../../../libs/octoauth/crates/octoemu/tests/fixtures/rsa2048.pub.pem");
+    include_str!("../../../libs/octoemu/crates/octoemu/tests/fixtures/rsa2048.pub.pem");
 
 /// The repo App's ID in `common::apps` (`GH_REPO_APP_ID`).
 const REPO_APP: u64 = 123;

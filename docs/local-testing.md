@@ -348,7 +348,7 @@ container-to-host discovery path before any invocation is sent.
 
 **GitHub is the emulator.** `ghinvite_e2e::Harness::start` (and
 `start_owned`, `github_emulator*`) serves an embedded
-[octoemu](../libs/octoauth/crates/octoemu/README.md) on `127.0.0.1:0` seeded
+[octoemu](../libs/octoemu/crates/octoemu/README.md) on `127.0.0.1:0` seeded
 with `ghinvite_e2e::github::seed` (`acme` 100, `acme/api` 10, `acme/web` 11,
 `creator` 7, `alice` 8, App 123 installed as 1, App 456 as 2). The production
 `InstallationClient` and `ReqwestTransport` sign real App JWTs with
@@ -360,7 +360,7 @@ leave, an installation's repositories change, an invitation expires, an
 organization renames itself. Answers GitHub would not give on its own (a
 refused, throttled, unanswered or lost write, a recycled login, an
 installation reported under another account, an outage) are
-[fault rules](../libs/octoauth/crates/octoemu/README.md#fault-rules), and
+[fault rules](../libs/octoemu/crates/octoemu/README.md#fault-rules), and
 counts come from the emulator's call log (how closely it matches real
 GitHub is checked by its fidelity suite, whose live side is set up in
 [live-github-tests.md](live-github-tests.md)). Every suite runs on it except

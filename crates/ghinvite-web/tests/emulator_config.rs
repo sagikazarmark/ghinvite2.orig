@@ -32,9 +32,9 @@ mod common;
 use common::sign_in::session_cookie;
 
 const PRIVATE_KEY: &str =
-    include_str!("../../../libs/octoauth/crates/octoemu/tests/fixtures/rsa2048.pem");
+    include_str!("../../../libs/octoemu/crates/octoemu/tests/fixtures/rsa2048.pem");
 const PUBLIC_KEY: &str =
-    include_str!("../../../libs/octoauth/crates/octoemu/tests/fixtures/rsa2048.pub.pem");
+    include_str!("../../../libs/octoemu/crates/octoemu/tests/fixtures/rsa2048.pub.pem");
 const SIGNIN_CLIENT_ID: &str = "Iv1.seam-signin";
 const SIGNIN_SECRET: &str = "seam-signin-secret";
 const REPO_CLIENT_ID: &str = "Iv1.seam-repo";

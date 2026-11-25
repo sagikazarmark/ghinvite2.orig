@@ -1,6 +1,6 @@
 // The octoemu GitHub emulator for the Worker drivers (GE-09b).
 //
-// `node build-octoemu.mjs` builds the binary once (libs/octoauth, its own
+// `node build-octoemu.mjs` builds the binary once (libs/octoemu, its own
 // workspace and target directory); `startOctoemu(seed)` spawns it on a free
 // loopback port, seeds it through the admin API and returns a handle. The
 // Workers reach it through the GE-09a bindings (`emulator.bindings`), which
@@ -15,14 +15,14 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { trackFixtureOutput } from './runtime-output.mjs';
 
-const toolkit = fileURLToPath(new URL('../../libs/octoauth/', import.meta.url));
-const manifest = join(toolkit, 'Cargo.toml');
+const emulatorWorkspace = fileURLToPath(new URL('../../libs/octoemu/', import.meta.url));
+const manifest = join(emulatorWorkspace, 'Cargo.toml');
 
 // `OCTOEMU_TARGET_DIR` builds into another target directory (CI uses the
 // root workspace's, which its Rust cache keeps).
 const targetDir = () => process.env.OCTOEMU_TARGET_DIR ? resolve(process.env.OCTOEMU_TARGET_DIR) : undefined;
 
-/** Builds the `octoemu` binary (the toolkit workspace's target directory). */
+/** Builds the `octoemu` binary (the emulator workspace's target directory). */
 export function buildOctoemu() {
   execFileSync('cargo', ['build', '--locked', '--manifest-path', manifest, '-p', 'octoemu', '--bin', 'octoemu',
     ...(targetDir() ? ['--target-dir', targetDir()] : [])], {
@@ -43,7 +43,7 @@ export function octoemuBinary() {
 
 // ghinvite's fixture App key (test-fixtures/github-app-rsa.pem), as the Apps'
 // registered public key: the Workers sign their App JWTs with the private half.
-export const fixturePublicKey = readFileSync(new URL('../../libs/octoauth/crates/octoemu/tests/fixtures/rsa2048.pub.pem', import.meta.url), 'utf8');
+export const fixturePublicKey = readFileSync(new URL('../../libs/octoemu/crates/octoemu/tests/fixtures/rsa2048.pub.pem', import.meta.url), 'utf8');
 
 /**
  * Seed parts shared by the drivers: the sign-in App (client ID and secret as

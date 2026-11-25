@@ -39,10 +39,10 @@ dagger check ghinvite:fmt ghinvite:clippy ghinvite:test
 dagger check ghinvite:wasm
 dagger check ghinvite:css
 dagger check ghinvite:island ghinvite:web-worker ghinvite:workflows-worker
-dagger check ghinvite:toolkit
+dagger check ghinvite:toolkit ghinvite:emulator
 ```
 
-`dagger check` runs all nine checks (including `ghinvite:toolkit` for `libs/octoauth`). The CSS check fails when the tracked
+`dagger check` runs all ten checks (including `ghinvite:toolkit` for `libs/octoauth` and `ghinvite:emulator` for `libs/octoemu`). The CSS check fails when the tracked
 stylesheet needs regeneration, just like CI. Builds run in containers and can be
 exported explicitly:
 
@@ -206,7 +206,7 @@ GHINVITE_RESTATE_AUTH=local-unauthenticated \
 cargo run -p ghinvite-web-server -- --local-dev
 ```
 
-To develop against the [`octoemu`](libs/octoauth/crates/octoemu/README.md) GitHub emulator instead of GitHub, start it with a seed of your Apps and users (`cargo run --manifest-path libs/octoauth/Cargo.toml -p octoemu -- --port 0 --seed seed.json` prints its loopback `api_base` and `web_base`; avatars are at `{web_base}/avatars`) and add `GITHUB_API_BASE`, `GITHUB_WEB_BASE` and `GITHUB_AVATAR_BASE` with those values to both commands (the workflows server uses only `GITHUB_API_BASE`). Only `--local-dev` and `--local-unsigned` accept them; production startup refuses them ([deploy](docs/deploy.md#p1-app-split-configuration)). Navigating to `/login` signs in through the emulator, and the Content-Security-Policy's `form-action` names the configured `GITHUB_WEB_BASE` origin (production keeps `https://github.com`), so a form POST from an expired session bounces to the emulator's authorize page as it would to GitHub's.
+To develop against the [`octoemu`](libs/octoemu/crates/octoemu/README.md) GitHub emulator instead of GitHub, start it with a seed of your Apps and users (`cargo run --manifest-path libs/octoemu/Cargo.toml -p octoemu -- --port 0 --seed seed.json` prints its loopback `api_base` and `web_base`; avatars are at `{web_base}/avatars`) and add `GITHUB_API_BASE`, `GITHUB_WEB_BASE` and `GITHUB_AVATAR_BASE` with those values to both commands (the workflows server uses only `GITHUB_API_BASE`). Only `--local-dev` and `--local-unsigned` accept them; production startup refuses them ([deploy](docs/deploy.md#p1-app-split-configuration)). Navigating to `/login` signs in through the emulator, and the Content-Security-Policy's `form-action` names the configured `GITHUB_WEB_BASE` origin (production keeps `https://github.com`), so a form POST from an expired session bounces to the emulator's authorize page as it would to GitHub's.
 
 App available at `http://127.0.0.1:8787`. Both services point at the same `dev.sqlite` file for domain data. Native sessions use a separate in-memory SQLite database, encrypted with the configured session key, and disappear on restart. Sign-in requires a real sign-in GitHub App with `http://127.0.0.1:8787/oauth/callback` as the callback URL. Other env vars have local defaults.
 
@@ -291,7 +291,7 @@ GitHub access is split between the toolkit crates in `libs/octoauth`
 `octologin` for sign-in, `octoscrub` for redaction; `octoevents` from crates.io
 for webhooks) and `crates/ghinvite-github`, ghinvite's own REST client: transport
 (native and Worker), typed endpoints and fixtures. Integration tests run
-against `octoemu` (`libs/octoauth/crates/octoemu`), a stateful GitHub App
+against `octoemu` (`libs/octoemu/crates/octoemu`), a stateful GitHub App
 emulator reached through `GITHUB_API_BASE` outside production. Third-party sources,
 pinned forks and their reasons are listed in [`PROVENANCE.md`](PROVENANCE.md).
 
@@ -302,6 +302,7 @@ GitHub Actions runs on every push and PR to `main`:
 - **Test** — `cargo test --workspace`
 - **Lint** — `cargo fmt --check` + `cargo clippy`
 - **GitHub App toolkit** — fmt, clippy, tests and the wasm32 check of the `libs/octoauth` workspace
+- **GitHub emulator** — fmt, clippy, tests and the fidelity suite (emulator target) of the `libs/octoemu` workspace
 - **wasm32 build** — `cargo check -p ghinvite-ui` and `-p ghinvite-island` (browser) plus `cargo build` for the three Worker-side crates, each with `-p` and `--target wasm32-unknown-unknown`
 - **Island bundle** — `scripts/build-island.sh` (dx bundle, size budget), `cargo test -p ghinvite-island` (markup parity), clippy for wasm32; uploads `dist/public` as an artifact
 - **Restate approval and delivery gate** — `authoritative_admission` against a spawned native `restate-server` (one per test), and `bash scripts/test-restate.sh <target>` for `request_owner`, `canonical_link`, `retained_delivery`, `approved_delivery`, `installation_availability`, `installation_audit_replay` and `durable_projection`: digest-pinned disposable Restate, real GitHub HTTP client against the octoemu GitHub emulator, authoritative admission/lifecycle, retained delivery and projection recovery

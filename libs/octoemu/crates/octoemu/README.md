@@ -823,7 +823,7 @@ emulator always runs destructive scenarios). The emulator run fails on a
 mismatch, a failed scenario or a schema violation; a live run fails on a
 failed scenario or a mismatch against a live snapshot (against an
 emulator snapshot the diff is reported as the fidelity signal). CI runs
-the emulator target in the toolkit job; the manual workflow
+the emulator target in its `emulator` job; the manual workflow
 `.github/workflows/fidelity-live.yml` (`workflow_dispatch` only) runs the
 live target from repository secrets.
 
@@ -884,7 +884,7 @@ report are GE-10.
 ## Tests
 
 ```bash
-cd libs/octoauth
+cd libs/octoemu
 cargo test -p octoemu
 cargo clippy -p octoemu --all-targets -- -D warnings
 ```
@@ -916,7 +916,7 @@ non-expiring App, the authorize errors, the HTML page and its form, the
 token caps, the `/applications` routes, admin-minted tokens and PATs, user
 tokens on `GET /repos/…`, invitations accepted and declined through the
 user routes (with `member.added` delivered under manual dispatch) and
-refuse-assumed mode. `crates/octologin/tests/emulator.rs` runs octologin's
+refuse-assumed mode. `tests/octologin.rs` runs octologin's
 sign-in against an embedded emulator (including `access_denied` and the
 `Incomplete` rule for more than 100 addresses); in the ghinvite workspace,
 `crates/ghinvite-web/tests/emulator_signin.rs` drives ghinvite-web's real

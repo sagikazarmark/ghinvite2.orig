@@ -12,21 +12,15 @@ publish = false
 [workspace.dependencies]
 octoauth = { version = "0.1.0", path = "crates/octoauth" }
 octoauth-octocrab = { version = "0.1.0", path = "crates/octoauth-octocrab" }
-# Native-only test dependency (octologin's tests/emulator.rs).
-octoemu = { version = "0.1.0", path = "crates/octoemu" }
 octoscrub = { version = "0.1.0", path = "crates/octoscrub" }
 octotoken = { version = "0.1.0", path = "crates/octotoken" }
 
 async-trait = "0.1"
-# octoemu only (native): the emulator's HTTP server.
-axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "matched-path", "query"] }
 base64 = "0.22"
 bytes = "1.10.0"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 futures-util = { version = "0.3", default-features = false }
 getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
-# octoemu only (native): signs its installation tokens (HS256).
-hmac = "0.13"
 http = "1"
 js-sys = "0.3"
 jsonwebtoken = { version = "12", default-features = false, features = ["rust_crypto", "use_pem"] }
@@ -38,15 +32,11 @@ rsa = { version = "0.10", default-features = false, features = ["std", "encoding
 send_wrapper = { version = "0.6", features = ["futures"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# octoemu only (native): the legacy `X-Hub-Signature` (HMAC-SHA1) on webhooks.
-sha1 = "0.11"
 sha2 = "0.11"
 static_assertions = "1.1.0"
 subtle = "2.6.1"
 thiserror = "2"
 tokio = { version = "1", default-features = false, features = ["macros", "rt", "rt-multi-thread", "net", "io-util"] }
-# octoemu only: parses its `fidelity.toml` manifest.
-toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 url = "2.5.4"
 wiremock = "0.6"

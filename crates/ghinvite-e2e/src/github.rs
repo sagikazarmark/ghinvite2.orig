@@ -48,7 +48,7 @@ pub const WEB_REPO_ID: u64 = 11;
 /// The public half of `test-fixtures/github-app-rsa.pem`, the key both
 /// Apps verify JWTs against.
 pub const PUBLIC_KEY: &str =
-    include_str!("../../../libs/octoauth/crates/octoemu/tests/fixtures/rsa2048.pub.pem");
+    include_str!("../../../libs/octoemu/crates/octoemu/tests/fixtures/rsa2048.pub.pem");
 
 /// The suites' world: `acme` (100, an organization created in 2020) with
 /// the private `acme/api` (10) and `acme/web` (11); `creator` (7) owns

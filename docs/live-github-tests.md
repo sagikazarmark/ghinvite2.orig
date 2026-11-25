@@ -1,11 +1,11 @@
 # Live GitHub tests
 
-octoemu's fidelity suite (`libs/octoauth/crates/octoemu-conformance`) runs
+octoemu's fidelity suite (`libs/octoemu/crates/octoemu-conformance`) runs
 the same scenarios against the emulator and against real GitHub. CI runs the
 emulator side on every push. This guide sets up the GitHub side: the
 accounts, Apps, organizations and the env file the live run reads. The
 scenarios themselves are described in the
-[octoemu README](../libs/octoauth/crates/octoemu/README.md#fidelity-suite-octoemu-conformance).
+[octoemu README](../libs/octoemu/crates/octoemu/README.md#fidelity-suite-octoemu-conformance).
 
 The live run is not a ghinvite deployment. It uses two throwaway GitHub Apps
 on a throwaway organization, and nothing in it touches ghinvite's own App.
@@ -327,12 +327,12 @@ token, a reinstalled App's new installation ID) go straight into
 
 ## 9. Run it
 
-From `libs/octoauth`, in the dev shell. The suite finds
+From `libs/octoemu`, in the dev shell. The suite finds
 `.octoemu-live/live.env` itself; set `OCTOEMU_LIVE_ENV` to use another
 file.
 
 ```sh
-cd libs/octoauth
+cd libs/octoemu
 # Smoke test: one harmless scenario.
 OCTOEMU_CONFORMANCE_ONLY=jwt-error-matrix \
   cargo test -p octoemu-conformance --test live --locked -- --ignored --nocapture

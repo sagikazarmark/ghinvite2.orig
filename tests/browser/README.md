@@ -39,7 +39,7 @@ npm exec --prefix tests/browser -- playwright test --config tests/browser/emulat
 The fixture (`crates/ghinvite-web/tests/emulator_browser.rs`, port 4176) is
 the `--local-dev` configuration with `GITHUB_API_BASE`, `GITHUB_WEB_BASE`
 and `GITHUB_AVATAR_BASE` pointing at an embedded
-[octoemu](../../libs/octoauth/crates/octoemu/README.md) emulator; nothing on
+[octoemu](../../libs/octoemu/crates/octoemu/README.md) emulator; nothing on
 GitHub's side is simulated by the browser test. Chromium, with and without
 JavaScript, signs in on the emulator's authorize page, and a Console form
 submitted after the session's cookies are gone bounces `303 → /login → 303`

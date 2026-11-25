@@ -23,7 +23,7 @@ mod common;
 use common::sign_in::{ConsoleInstallationFixture, SIGNIN_CLIENT_ID, session_cookie};
 
 const PUBLIC_KEY: &str =
-    include_str!("../../../libs/octoauth/crates/octoemu/tests/fixtures/rsa2048.pub.pem");
+    include_str!("../../../libs/octoemu/crates/octoemu/tests/fixtures/rsa2048.pub.pem");
 const SECRET: &str = "signin-test-secret";
 const CALLBACK: &str = "https://p1.test/oauth/callback";
 

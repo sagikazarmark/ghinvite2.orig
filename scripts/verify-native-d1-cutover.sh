@@ -23,9 +23,9 @@ inputs={p:hashlib.sha256((root/p).read_bytes()).hexdigest() for p in paths if p 
 (out/'checkout.txt').write_text(subprocess.check_output(['git','rev-parse','HEAD'],cwd=root).decode())
 PY
 cargo build --locked -p ghinvite-workflows-server --features bridge-fixture --example native-bridge-endpoint --message-format=json > "$EVIDENCE_ROOT/native-build.jsonl" 2> "$EVIDENCE_ROOT/native-build.log"
-# GitHub is the octoemu emulator (libs/octoauth, its own workspace), built into
+# GitHub is the octoemu emulator (libs/octoemu, its own workspace), built into
 # this checkout's target directory.
-cargo build --locked --manifest-path libs/octoauth/Cargo.toml --target-dir target -p octoemu --bin octoemu --message-format=json > "$EVIDENCE_ROOT/octoemu-build.jsonl" 2> "$EVIDENCE_ROOT/octoemu-build.log"
+cargo build --locked --manifest-path libs/octoemu/Cargo.toml --target-dir target -p octoemu --bin octoemu --message-format=json > "$EVIDENCE_ROOT/octoemu-build.jsonl" 2> "$EVIDENCE_ROOT/octoemu-build.log"
 python3 - "$EVIDENCE_ROOT" <<'PY'
 import hashlib,json,pathlib,shutil,sys
 out=pathlib.Path(sys.argv[1]);artifacts={}

@@ -26,9 +26,9 @@ mod common;
 use common::sign_in::ConsoleInstallationFixture as _;
 
 const PRIVATE_KEY: &str =
-    include_str!("../../../libs/octoauth/crates/octoemu/tests/fixtures/rsa2048.pem");
+    include_str!("../../../libs/octoemu/crates/octoemu/tests/fixtures/rsa2048.pem");
 const PUBLIC_KEY: &str =
-    include_str!("../../../libs/octoauth/crates/octoemu/tests/fixtures/rsa2048.pub.pem");
+    include_str!("../../../libs/octoemu/crates/octoemu/tests/fixtures/rsa2048.pub.pem");
 const ADDRESS: &str = "127.0.0.1:4176";
 const BASE_URL: &str = "http://127.0.0.1:4176";
 const SIGNIN_CLIENT_ID: &str = "Iv1.browser-signin";

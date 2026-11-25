@@ -64,6 +64,18 @@ type Ghinvite {
   }
 
   """
+  The octoemu GitHub emulator and its fidelity suite (emulator target) are
+  their own workspace under libs/octoemu.
+  """
+  emulator: String! @check {
+    self.rust.withWorkdir("/work/src/libs/octoemu")
+      .withExec(["cargo", "fmt", "--check"])
+      .withExec(["cargo", "clippy", "--workspace", "--all-targets", "--all-features", "--locked", "--", "-D", "warnings"])
+      .withExec(["cargo", "test", "--workspace", "--all-features", "--locked"])
+      .combinedOutput
+  }
+
+  """
   Build CSS and fail if the tracked stylesheet is stale.
   """
   css: String! @check {

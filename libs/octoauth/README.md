@@ -12,7 +12,6 @@ extracted to its own repository once a second product uses it.
 | `octoauth-octocrab` | octocrab glue: a client builder for the App's API, `octocrab::Error` converted to `ApiError` without upstream text, the 401 signals for `with_token` and `App::with_credential`. Separate from octoauth so octocrab's breaking releases stay out of octoauth's versions |
 | `octologin` | Sign-in web flow: authorize URL with state + PKCE, code exchange, `GET /user`, verified emails, token revocation. Never persists a token |
 | `octoscrub` | Pattern-based scrubbing of tokens, Basic/Bearer credentials and JWTs from log text |
-| `octoemu` | Test-only, native-only GitHub emulator (embedded or `octoemu` binary): seed, virtual clock, admin API, call log, fidelity manifest, App auth (GE-02), repositories, collaborators and invitations with a webhook outbox (GE-03); every other route answers 501 (`../../docs/specs/github-emulator.md`, `crates/octoemu/README.md`) |
 
 Design and scope: `../../docs/decisions/0014-gh-toolkit2-scope-client-agnostic.md`
 (client-agnostic: no owned REST client, no transport seam, webhooks via
@@ -21,8 +20,14 @@ plan `../../docs/specs/octoauth-plan.md`. Examples of attaching a token to
 `octocrab` and `reqwest` are in `crates/octotoken/examples/`.
 
 `examples/installations` is a complete, minimal GitHub App (a CLI that lists
-the App's installations and their repositories), tested against octoemu.
-Its README lists the friction it found in the toolkit.
+the App's installations and their repositories), tested against a
+local GitHub stand-in (wiremock). Its README lists the friction it found in
+the toolkit.
+
+The GitHub emulator, `octoemu`, is not part of the toolkit: it is ghinvite's
+test infrastructure, in its own workspace at `../octoemu`. Its tests run the
+toolkit's clients against it (`octoauth`, `octotoken`, `octologin`). The
+toolkit's own tests use wiremock.
 
 Optional features:
 
@@ -47,9 +52,9 @@ cargo check --locked -p octoauth -p octotoken -p octologin -p octoscrub --target
 cargo check --locked -p octoauth -p octotoken -p octologin -p octoscrub --all-features --target wasm32-unknown-unknown
 ```
 
-`octoemu`, `octoauth-octocrab` and `examples/installations` are native-only
-and left out of the wasm32 checks; on wasm32 they compile to empty crates, so
-a `--workspace` wasm32 check still passes. (octocrab on Workers needs its own
+`octoauth-octocrab` and `examples/installations` are native-only and left
+out of the wasm32 checks; on wasm32 they compile to empty crates, so a
+`--workspace` wasm32 check still passes. (octocrab on Workers needs its own
 transport, which is unverified; ADR 0014.)
 
 Hardening before a second consumer (HANDOFF §3.5, tier (a)), done:
