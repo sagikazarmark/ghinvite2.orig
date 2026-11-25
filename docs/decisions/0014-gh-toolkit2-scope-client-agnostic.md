@@ -97,6 +97,20 @@ These refine decisions 5 and 6 for the first consumer. They don't change the dec
 
 - ghinvite no longer uses gh-toolkit, and `implementation/gh-toolkit` is deleted. That closes the consequence "gh-toolkit stays in place until ghinvite migrates", ahead of SP-19/SP-19a, by the user's decision PD-7. Legacy OAuth is removed, and typed sign-in on `octologin` is the only sign-in path. Details are in `plans/ghinvite-toolkit-migration.md` §7.
 
+## Amendment notes (2026-11-25, octocrab adapter and app-level retry)
+
+These apply decision 5; they don't change the decision.
+
+- **Trigger:** the toolkit's example GitHub App (`libs/octoauth/examples/installations`, a CLI listing the App's installations and their repositories, tested against octoemu) copied the octocrab error conversion of `crates/octotoken/examples/octocrab.rs` word for word. That is the duplication decision 5 waited for, though from an example, not a second product.
+- **`octoauth-octocrab`** (new crate in the toolkit workspace) is the first part of decision 5's deferred octocrab adapter:
+  - `builder(&App)`: octocrab's builder for the App's API base, with bounded connect and read times and no auth; `authenticated` derives a client per credential;
+  - `Error`: `octocrab::Error` reduced to `ApiError` or a fixed `gh:octocrab:client`, without upstream text (the conversion this ADR's consequences require);
+  - `is_unauthorized` and `unauthorized`: the 401 signals for `with_token` and `App::with_credential`.
+- **A separate crate, not an octoauth feature,** so octocrab's breaking minor releases change only the adapter's version. octoauth still depends on no client (decision 1).
+- **Still deferred:** the hardened service stack (body cap, refusing redirects in a custom service), the Workers transport for octocrab, and the octoevents glue. The adapter documents leaving octocrab's `retry` and `follow-redirect` features off; Cargo feature unification means it cannot enforce that. It is native-only.
+- **`App::with_credential`** (octoauth) gives requests to app-level endpoints the crate does not wrap the same clock-skew correction as its own requests: one retry after a 401 that GitHub's `Date` explains. Before, a request built from `App::credential` failed for good on a skewed host clock unless the caller first made an octoauth call to re-learn the skew.
+- **`WithTokenError`** (octotoken) is no longer `#[non_exhaustive]` and gains `map` and `into_error`; the new `WithCredentialError` has the same shape.
+
 ## Evidence
 
 - `implementation/gh-toolkit` (inventory of modules and consumers, 2026-10-20 session)
